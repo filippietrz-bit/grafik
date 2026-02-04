@@ -7,7 +7,8 @@ from github import Github
 from io import StringIO
 
 # --- KONFIGURACJA ZESPOŁU ---
-DOCTORS_TEAM = ["Jędrzej", "Filip", "Ihab", "Kacper", "Jakub", "Tymoteusz"]
+# Dodano Daniela do listy
+DOCTORS_TEAM = ["Jędrzej", "Filip", "Ihab", "Kacper", "Jakub", "Tymoteusz", "Daniel"]
 JAKUB_SZ = "Jakub Sz."
 ALL_DOCTORS = [JAKUB_SZ] + DOCTORS_TEAM
 
