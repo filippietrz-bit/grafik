@@ -7,10 +7,29 @@ from github import Github
 from io import StringIO
 
 # --- KONFIGURACJA ZESPOŁU ---
-# Dodano Daniela do listy
-DOCTORS_TEAM = ["Jędrzej", "Filip", "Ihab", "Kacper", "Jakub", "Tymoteusz", "Daniel"]
-JAKUB_SZ = "Jakub Sz."
-ALL_DOCTORS = [JAKUB_SZ] + DOCTORS_TEAM
+
+# Grupa 1: Lekarze z "grafikiem sztywnym" (wybierają konkretne dni, nie biorą udziału w losowaniu reszty)
+FIXED_DOCTORS = [
+    "Jakub Sz.", 
+    "Gerard", 
+    "Tomasz", 
+    "Rafał", 
+    "Marcin", 
+    "Daniel",
+    "Weronika"
+]
+
+# Grupa 2: Lekarze "rotacyjni" (biorą udział w losowaniu pozostałych dni)
+ROTATION_DOCTORS = [
+    "Jędrzej", 
+    "Filip", 
+    "Ihab", 
+    "Kacper", 
+    "Jakub", 
+    "Tymoteusz"
+]
+
+ALL_DOCTORS = FIXED_DOCTORS + ROTATION_DOCTORS
 
 # Statusy
 STATUS_AVAILABLE = "Chcę dyżur (Dostępny)"
@@ -168,19 +187,25 @@ def generate_schedule(dates, preferences_df, target_limits):
             if d_str not in prefs_map: prefs_map[d_str] = {}
             prefs_map[d_str][row['Lekarz']] = row['Status']
 
-    # KROK 1: SZTYWNE DYŻURY
+    # KROK 1: SZTYWNE DYŻURY (Wszystkich, ale głównie grupy FIXED_DOCTORS)
     for d in dates:
         d_str = d.strftime('%Y-%m-%d')
         day_prefs = prefs_map.get(d_str, {})
         
         assigned_fixed = None
-        if day_prefs.get(JAKUB_SZ) == STATUS_FIXED:
-            assigned_fixed = JAKUB_SZ
-        else:
-            for doc in DOCTORS_TEAM:
+        
+        # Priorytet dla grupy Fixed
+        for doc in FIXED_DOCTORS:
+            if day_prefs.get(doc) == STATUS_FIXED:
+                assigned_fixed = doc
+                break
+        
+        # Jeśli nikt z fixed nie ma, sprawdzamy rotacyjnych (też mogą mieć fixed)
+        if not assigned_fixed:
+            for doc in ROTATION_DOCTORS:
                 if day_prefs.get(doc) == STATUS_FIXED:
                     assigned_fixed = doc
-                    break 
+                    break
         
         if assigned_fixed:
             schedule[d_str] = assigned_fixed
@@ -190,7 +215,7 @@ def generate_schedule(dates, preferences_df, target_limits):
             if wk not in weekly_counts: weekly_counts[wk] = {}
             weekly_counts[wk][assigned_fixed] = weekly_counts[wk].get(assigned_fixed, 0) + 1
 
-    # KROK 2: Obsadzanie reszty dni
+    # KROK 2: Obsadzanie reszty dni (Tylko grupa ROTATION_DOCTORS)
     days_to_fill = [d for d in dates if d.strftime('%Y-%m-%d') not in schedule]
     random.shuffle(days_to_fill)
     
@@ -203,14 +228,21 @@ def generate_schedule(dates, preferences_df, target_limits):
         prev_day = (d - datetime.timedelta(days=1)).strftime('%Y-%m-%d')
         next_day = (d + datetime.timedelta(days=1)).strftime('%Y-%m-%d')
 
-        for doc in DOCTORS_TEAM:
+        for doc in ROTATION_DOCTORS:
+            # 1. Limit globalny
             if stats[doc]['Total'] >= target_limits.get(doc, 0): continue
             
+            # 2. Dostępność
             status = prefs_map.get(d_str, {}).get(doc, STATUS_AVAILABLE)
             if status == STATUS_UNAVAILABLE: continue
             
+            # 3. Odpoczynek po dyżurze (wczoraj)
             if schedule.get(prev_day) == doc: continue
+            
+            # 4. Odpoczynek przed dyżurem (jutro - fixed)
             if schedule.get(next_day) == doc: continue
+            
+            # 5. Limit tygodniowy
             if weekly_counts.get(wk, {}).get(doc, 0) >= 2: continue
 
             weight = 10 if status == STATUS_AVAILABLE else 1
@@ -251,12 +283,13 @@ tab1, tab2 = st.tabs(["📝 Zgłaszanie Dostępności", "🧮 Kalkulator i Grafi
 # --- TAB 1 ---
 with tab1:
     st.subheader(f"Dostępność: {sel_period_name} {sel_year}")
-    current_user = st.selectbox("Lekarz:", ALL_DOCTORS, index=2)
+    current_user = st.selectbox("Lekarz:", ALL_DOCTORS, index=2) # Domyślnie Filip
     
     dates = get_period_dates(sel_year, start_m)
     df_db = load_data()
     
-    if current_user == JAKUB_SZ:
+    # --- LOGIKA DLA GRUPY FIXED (Uproszczona Lista) ---
+    if current_user in FIXED_DOCTORS:
         st.info("👋 Tryb dodawania pojedynczych dyżurów. Kliknij '+', aby dodać wiersz i wybierz datę.")
         
         existing_data = []
@@ -288,7 +321,7 @@ with tab1:
             hide_index=True
         )
         
-        if st.button("💾 Zapisz Dyżury Jakuba (GitHub)", type="primary"):
+        if st.button(f"💾 Zapisz Dyżury ({current_user})", type="primary"):
             with st.spinner("Zapisywanie..."):
                 valid_entries = []
                 period_date_strs = [d.strftime('%Y-%m-%d') for d in dates]
@@ -312,8 +345,9 @@ with tab1:
                     mask_remove = (df_db['Lekarz'] == current_user) & (df_db['Data'].isin(period_date_strs))
                     df_cleaned = df_db[~mask_remove]
                     final_db = pd.concat([df_cleaned, final_new], ignore_index=True)
-                if save_data(final_db): st.success("Zapisano listę dyżurów Jakuba!")
+                if save_data(final_db): st.success(f"Zapisano listę dyżurów dla: {current_user}")
 
+    # --- LOGIKA DLA GRUPY ROTATION (Pełny Kalendarz) ---
     else:
         t_data = []
         for d in dates:
@@ -334,7 +368,7 @@ with tab1:
             "Status": st.column_config.SelectboxColumn("Decyzja", options=opts, required=True, width="medium")
         }, hide_index=True, height=600, use_container_width=True)
         
-        if st.button("💾 Zapisz Dostępność (GitHub)", type="primary"):
+        if st.button(f"💾 Zapisz Dostępność ({current_user})", type="primary"):
             with st.spinner("Zapisywanie..."):
                 new_entries = [{"Data": r['Data'].strftime('%Y-%m-%d'), "Lekarz": current_user, "Status": r['Status']} for _, r in edited_df.iterrows()]
                 final = pd.DataFrame(new_entries)
@@ -350,33 +384,66 @@ with tab2:
     all_prefs = load_data()
     dates_gen = get_period_dates(sel_year, start_m)
     
-    fixed_counts_team = {doc: 0 for doc in DOCTORS_TEAM}
-    jakub_fixed_count = 0
+    # 1. Obliczamy ile dyżurów ma grupa FIXED (z bazy)
+    fixed_counts_map = {doc: 0 for doc in FIXED_DOCTORS}
     
     if not all_prefs.empty:
-        for d in dates_gen:
-            d_s = d.strftime('%Y-%m-%d')
-            day_entries = all_prefs[all_prefs['Data'] == d_s]
-            for _, row in day_entries.iterrows():
-                if row['Lekarz'] == JAKUB_SZ and row['Status'] == STATUS_FIXED:
-                    jakub_fixed_count += 1
-                if row['Lekarz'] in DOCTORS_TEAM and row['Status'] == STATUS_FIXED:
-                    fixed_counts_team[row['Lekarz']] += 1
+        d_strs = [d.strftime('%Y-%m-%d') for d in dates_gen]
+        # Filtrujemy tylko wpisy z tego okresu i tylko fixed
+        period_data = all_prefs[all_prefs['Data'].isin(d_strs)]
+        
+        for doc in FIXED_DOCTORS:
+            count = len(period_data[(period_data['Lekarz'] == doc) & (period_data['Status'] == STATUS_FIXED)])
+            fixed_counts_map[doc] = count
 
     total_days = len(dates_gen)
     c1, c2, c3 = st.columns(3)
     c1.metric("Liczba dni w okresie", total_days)
-    jakub_shifts = c2.number_input(f"Dyżury {JAKUB_SZ}", min_value=0, max_value=total_days, value=jakub_fixed_count)
-    rem_days = total_days - jakub_shifts
-    c3.metric(f"Do podziału na {len(DOCTORS_TEAM)} os.", max(0, rem_days))
+    
+    # Wyświetlamy tabelkę z podsumowaniem dyżurów Fixed (tylko do odczytu/edycji sumy)
+    st.subheader("Dyżury Ustalone (Fixed)")
+    st.caption("Poniżej liczba dyżurów zaciągnięta z bazy. Możesz ją ręcznie skorygować w kolumnie 'Do Obliczeń', aby wpłynąć na pulę dla reszty.")
+    
+    fixed_table_data = []
+    for doc in FIXED_DOCTORS:
+        fixed_table_data.append({
+            "Lekarz": doc, 
+            "Z bazy": fixed_counts_map[doc],
+            "Do Obliczeń": fixed_counts_map[doc]
+        })
+    
+    edited_fixed_table = st.data_editor(
+        pd.DataFrame(fixed_table_data),
+        column_config={
+            "Lekarz": st.column_config.TextColumn(disabled=True),
+            "Z bazy": st.column_config.NumberColumn(disabled=True),
+            "Do Obliczeń": st.column_config.NumberColumn(min_value=0, max_value=31, step=1)
+        },
+        hide_index=True,
+        use_container_width=True
+    )
+    
+    total_fixed_calculated = edited_fixed_table["Do Obliczeń"].sum()
+    c2.metric("Suma Fixed", total_fixed_calculated)
+    
+    rem_days = total_days - total_fixed_calculated
+    c3.metric(f"Do podziału na {len(ROTATION_DOCTORS)} os.", max(0, rem_days))
     
     st.write("---")
-    st.subheader(f"Limity dla Zespołu (Suma musi wynosić {rem_days})")
+    st.subheader(f"Limity dla Zespołu Rotacyjnego (Suma musi wynosić {rem_days})")
     
-    total_team_fixed = sum(fixed_counts_team.values())
-    to_randomize = max(0, rem_days - total_team_fixed)
+    # Obliczamy ile fixed mają lekarze ROTACYJNI (może się zdarzyć)
+    fixed_rotation_counts = {doc: 0 for doc in ROTATION_DOCTORS}
+    if not all_prefs.empty:
+        period_data = all_prefs[all_prefs['Data'].isin([d.strftime('%Y-%m-%d') for d in dates_gen])]
+        for doc in ROTATION_DOCTORS:
+            count = len(period_data[(period_data['Lekarz'] == doc) & (period_data['Status'] == STATUS_FIXED)])
+            fixed_rotation_counts[doc] = count
+            
+    total_rotation_fixed_already = sum(fixed_rotation_counts.values())
+    to_randomize = max(0, rem_days - total_rotation_fixed_already)
     
-    team_size = len(DOCTORS_TEAM)
+    team_size = len(ROTATION_DOCTORS)
     if team_size > 0:
         base_extra = to_randomize // team_size
         remainder_extra = to_randomize % team_size
@@ -385,9 +452,9 @@ with tab2:
         remainder_extra = 0
         
     lim_data = []
-    for i, doc in enumerate(DOCTORS_TEAM):
+    for i, doc in enumerate(ROTATION_DOCTORS):
         extra = base_extra + 1 if i < remainder_extra else base_extra
-        val_fixed = fixed_counts_team[doc]
+        val_fixed = fixed_rotation_counts[doc]
         total_suggested = val_fixed + extra
         lim_data.append({"Lekarz": doc, "Limit Docelowy": total_suggested})
         
@@ -405,7 +472,19 @@ with tab2:
     if current_target_sum == rem_days:
         st.success(f"Suma limitów ({current_target_sum}) zgadza się z pulą do podziału ({rem_days}).")
         if st.button("🚀 GENERUJ", type="primary"):
-            targets = {r['Lekarz']: r['Limit Docelowy'] for _, r in edited_limits.iterrows()}
+            # Budujemy targets dla wszystkich. 
+            # Dla Fixed - bierzemy to co w tabeli "Do Obliczeń" (chociaż algorytm i tak patrzy na konkretne dni, 
+            # ale do statystyk się przyda).
+            # Dla Rotation - bierzemy z tabeli limitów.
+            
+            targets = {}
+            # Dodajemy rotacyjnych
+            for _, r in edited_limits.iterrows():
+                targets[r['Lekarz']] = r['Limit Docelowy']
+            # Dodajemy fixed (żeby statystyki miały sensowne "Cel")
+            for _, r in edited_fixed_table.iterrows():
+                targets[r['Lekarz']] = r['Do Obliczeń']
+
             sch, stats = generate_schedule(dates_gen, all_prefs, targets)
             
             res_rows = []
@@ -433,9 +512,7 @@ with tab2:
             st.write("---")
             s_rows = []
             for d in ALL_DOCTORS:
-                if d == JAKUB_SZ: goal = jakub_shifts 
-                else: goal = targets.get(d, 0)
-                
+                goal = targets.get(d, 0)
                 s_rows.append({
                     "Lekarz": d, 
                     "Cel": goal, 
@@ -445,4 +522,4 @@ with tab2:
 
             st.dataframe(pd.DataFrame(s_rows), hide_index=True)
     else:
-        st.error(f"Suma limitów w tabeli wynosi {current_target_sum}, a powinna {rem_days} (Całość minus Jakub Sz.). Skoryguj liczby.")
+        st.error(f"Suma limitów rotacyjnych wynosi {current_target_sum}, a powinna {rem_days}. Skoryguj liczby.")
