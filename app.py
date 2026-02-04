@@ -15,7 +15,7 @@ ALL_DOCTORS = [JAKUB_SZ] + DOCTORS_TEAM
 STATUS_AVAILABLE = "Chcę dyżur (Dostępny)"
 STATUS_RELUCTANT = "Mogę (Niechętnie)"
 STATUS_UNAVAILABLE = "Niedostępny"
-STATUS_FIXED = "Sztywny Dyżur (Już ustalony)"  # Zmiana nazwy na bardziej uniwersalną
+STATUS_FIXED = "Sztywny Dyżur (Już ustalony)"
 
 # Nazwa pliku w repozytorium
 DATA_FILE = "data.csv"
@@ -157,7 +157,6 @@ def get_day_group(date_obj):
 
 def generate_schedule(dates, preferences_df, target_limits):
     schedule = {} 
-    # Inicjalizacja statystyk dla WSZYSTKICH lekarzy
     stats = {doc: {'Total': 0, "Poniedziałki": 0, "Wtorki/Środy": 0, "Czwartki": 0, "Piątki": 0, "Soboty": 0, "Niedziele": 0} for doc in ALL_DOCTORS}
     weekly_counts = {}
 
@@ -169,28 +168,25 @@ def generate_schedule(dates, preferences_df, target_limits):
             prefs_map[d_str][row['Lekarz']] = row['Status']
 
     # KROK 1: SZTYWNE DYŻURY (Dla WSZYSTKICH lekarzy)
-    # Iterujemy po wszystkich datach i sprawdzamy, czy ktoś ma "Fixed"
     for d in dates:
         d_str = d.strftime('%Y-%m-%d')
         day_prefs = prefs_map.get(d_str, {})
         
-        # Sprawdzamy, czy któryś lekarz ma tu sztywny dyżur
         assigned_fixed = None
         for doc in ALL_DOCTORS:
             if day_prefs.get(doc) == STATUS_FIXED:
                 assigned_fixed = doc
-                break # Zakładamy, że tylko jedna osoba ma fixed na dany dzień (kto pierwszy ten lepszy w pętli)
+                break 
         
         if assigned_fixed:
             schedule[d_str] = assigned_fixed
             stats[assigned_fixed]['Total'] += 1
             stats[assigned_fixed][get_day_group(d)] += 1
-            
             wk = get_week_key(d)
             if wk not in weekly_counts: weekly_counts[wk] = {}
             weekly_counts[wk][assigned_fixed] = weekly_counts[wk].get(assigned_fixed, 0) + 1
 
-    # KROK 2: Obsadzanie reszty dni (tylko te, które nie są jeszcze w schedule)
+    # KROK 2: Obsadzanie reszty dni
     days_to_fill = [d for d in dates if d.strftime('%Y-%m-%d') not in schedule]
     random.shuffle(days_to_fill)
     
@@ -200,16 +196,10 @@ def generate_schedule(dates, preferences_df, target_limits):
         group = get_day_group(d)
         candidates = []
 
-        # Daty sąsiednie do sprawdzania odpoczynku
         prev_day = (d - datetime.timedelta(days=1)).strftime('%Y-%m-%d')
         next_day = (d + datetime.timedelta(days=1)).strftime('%Y-%m-%d')
 
-        for doc in ALL_DOCTORS: # Teraz wszyscy mogą brać udział w losowaniu reszty (jeśli mają wolne limity)
-            # Jeśli Jakub Sz. ma być tylko "fixed only", to można go tu pominąć warunkiem, 
-            # ale jeśli ma brać dodatkowe dyżury, to zostaje. 
-            # Domyślnie: Jakub Sz. zaznacza fixed, a reszta przydzielana jest wg limitu. 
-            # Jeśli w kalkulatorze wpisano dla niego limit = liczba fixed, to warunek 1 go wytnie.
-            
+        for doc in ALL_DOCTORS:
             # 1. Limit globalny
             if stats[doc]['Total'] >= target_limits.get(doc, 0): continue
             
@@ -217,19 +207,13 @@ def generate_schedule(dates, preferences_df, target_limits):
             status = prefs_map.get(d_str, {}).get(doc, STATUS_AVAILABLE)
             if status == STATUS_UNAVAILABLE: continue
             
-            # 3. Odpoczynek po dyżurze (DZIEŃ WCZEŚNIEJSZY)
-            # Czy lekarz pracował wczoraj?
+            # 3. Odpoczynek po dyżurze (wczoraj)
             if schedule.get(prev_day) == doc: continue
             
-            # 4. Odpoczynek przed dyżurem (DZIEŃ NASTĘPNY - FIXED)
-            # Czy lekarz ma JUŻ PRZYDZIELONY (sztywny) dyżur jutro?
-            # Jeśli tak, to dzisiaj nie może pracować, bo jutro rano wchodzi na dyżur (więc nie ma wolnego po dzisiejszym).
-            # A jeśli dzisiaj weźmie, to jutro nie będzie wypoczęty? 
-            # Zasada brzmi: dzień po dyżurze wolny. Więc jeśli wezmę dzisiaj, to jutro muszę mieć wolne.
-            # A jeśli jutro mam sztywny, to nie mogę mieć wolnego -> więc nie mogę wziąć dzisiaj.
+            # 4. Odpoczynek przed dyżurem (jutro - fixed)
             if schedule.get(next_day) == doc: continue
             
-            # 5. Limit tygodniowy (2 max)
+            # 5. Limit tygodniowy
             if weekly_counts.get(wk, {}).get(doc, 0) >= 2: continue
 
             weight = 10 if status == STATUS_AVAILABLE else 1
@@ -287,7 +271,6 @@ with tab1:
         m_name = "Msc 1" if d.month == start_m else "Msc 2"
         t_data.append({"Data": d, "Miesiąc": m_name, "Dzień / Święto": day_desc, "Status": status})
     
-    # TERAZ WSZYSCY MAJĄ DOSTĘP DO OPCJI 'FIXED'
     opts = [STATUS_AVAILABLE, STATUS_RELUCTANT, STATUS_FIXED, STATUS_UNAVAILABLE]
 
     edited_df = st.data_editor(pd.DataFrame(t_data), column_config={
@@ -313,31 +296,30 @@ with tab2:
     all_prefs = load_data()
     dates_gen = get_period_dates(sel_year, start_m)
     
-    # Zliczamy sztywne dyżury dla każdego lekarza
+    # Zliczamy sztywne dyżury (z bazy)
     fixed_counts = {doc: 0 for doc in ALL_DOCTORS}
     if not all_prefs.empty:
         for d in dates_gen:
             d_s = d.strftime('%Y-%m-%d')
-            # Pobieramy wpisy dla danej daty
             day_entries = all_prefs[all_prefs['Data'] == d_s]
             for _, row in day_entries.iterrows():
                 if row['Status'] == STATUS_FIXED:
                     fixed_counts[row['Lekarz']] = fixed_counts.get(row['Lekarz'], 0) + 1
 
     total_days = len(dates_gen)
-    total_fixed = sum(fixed_counts.values())
+    total_fixed_db = sum(fixed_counts.values())
     
     c1, c2, c3 = st.columns(3)
     c1.metric("Liczba dni", total_days)
-    c2.metric("Już obsadzone (Fixed)", total_fixed)
+    c2.metric("Obsadzone (z bazy)", total_fixed_db)
     
-    rem_days = total_days - total_fixed
-    c3.metric("Do losowania", max(0, rem_days))
+    rem_days = total_days - total_fixed_db
+    c3.metric("Teoretycznie do losowania", max(0, rem_days))
     
     st.write("---")
     st.subheader("Ustal Limity (Cel Dyżurów)")
+    st.caption("Możesz edytować obie kolumny liczb. Zmiana 'Ustalone' tutaj nie zmienia dni w kalendarzu, służy tylko do korekty sumy.")
     
-    # Proponowane limity: Fixed + (Reszta / Liczba Lekarzy)
     team_size = len(ALL_DOCTORS)
     if team_size > 0:
         base_extra = max(0, rem_days) // team_size
@@ -349,13 +331,16 @@ with tab2:
     lim_data = []
     for i, doc in enumerate(ALL_DOCTORS):
         extra = base_extra + 1 if i < remainder_extra else base_extra
-        total_suggested = fixed_counts[doc] + extra
-        lim_data.append({"Lekarz": doc, "Fixed (Już ma)": fixed_counts[doc], "Limit Docelowy": total_suggested})
+        # Domyślnie bierzemy fixed z bazy, ale user może to zmienić w tabeli
+        val_fixed = fixed_counts[doc]
+        total_suggested = val_fixed + extra
+        lim_data.append({"Lekarz": doc, "Ustalone (Fixed)": val_fixed, "Limit Docelowy": total_suggested})
         
     edited_limits = st.data_editor(
         pd.DataFrame(lim_data), 
         column_config={
-            "Fixed (Już ma)": st.column_config.NumberColumn(disabled=True),
+            # ODBLOKOWANE: User może zmienić liczbę fixed ręcznie, jeśli chce oszukać kalkulator
+            "Ustalone (Fixed)": st.column_config.NumberColumn(min_value=0, max_value=31, step=1),
             "Limit Docelowy": st.column_config.NumberColumn(min_value=0, max_value=31, step=1)
         },
         hide_index=True, 
