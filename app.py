@@ -54,25 +54,14 @@ class PDF(FPDF):
         self.cell(0, 10, f'Strona {self.page_no()}', 0, 0, 'C')
 
 def remove_pl_chars(text):
-    """
-    Zamienia polskie znaki i emoji na ASCII dla bezpieczeństwa PDF.
-    Usuwa emoji, które powodują UnicodeEncodeError w bibliotece FPDF.
-    """
     if not isinstance(text, str): return str(text)
-    
-    # 1. Mapa zamienników (polskie znaki + usuwanie emoji)
     replacements = {
         'ą': 'a', 'ć': 'c', 'ę': 'e', 'ł': 'l', 'ń': 'n', 'ó': 'o', 'ś': 's', 'ź': 'z', 'ż': 'z',
         'Ą': 'A', 'Ć': 'C', 'Ę': 'E', 'Ł': 'L', 'Ń': 'N', 'Ó': 'O', 'Ś': 'S', 'Ź': 'Z', 'Ż': 'Z',
-        '🔴': ' ', # Usuwamy kropkę (zastępujemy spacją)
-        '⚠️': '!',
-        '✅': 'OK'
+        '🔴': ' ', '⚠️': '!', '✅': 'OK'
     }
     for k, v in replacements.items():
         text = text.replace(k, v)
-    
-    # 2. Ostateczny bezpiecznik: kodowanie do latin-1 z zamianą nieznanych znaków na '?'
-    # To gwarantuje, że żaden dziwny znak nie przedostanie się do PDF
     try:
         return text.encode('latin-1', 'replace').decode('latin-1')
     except:
@@ -82,41 +71,30 @@ def create_pdf_bytes(dataframe, title):
     pdf = PDF()
     pdf.add_page()
     pdf.set_font("Arial", size=10)
-    
-    # Tytuł okresu
-    pdf.set_font("Arial", 'B', 12)
-    # Zabezpieczamy tytuł
     safe_title = remove_pl_chars(title)
+    pdf.set_font("Arial", 'B', 12)
     pdf.cell(0, 10, safe_title, 0, 1, 'L')
     pdf.ln(5)
     
-    # Nagłówki tabeli
     pdf.set_font("Arial", 'B', 10)
     pdf.cell(40, 10, 'Data', 1)
-    pdf.cell(60, 10, 'Dzien', 1) # Zwiększyłem szerokość dla dnia
+    pdf.cell(60, 10, 'Dzien', 1)
     pdf.cell(80, 10, 'Lekarz', 1)
     pdf.ln()
     
-    # Dane
     pdf.set_font("Arial", size=10)
     for _, row in dataframe.iterrows():
         d_str = row['Data'].strftime('%Y-%m-%d')
-        
-        # Zabezpieczamy teksty funkcją czyszczącą
         day_str = remove_pl_chars(row['Info'])
         doc_str = remove_pl_chars(str(row['Dyżurny']))
-        
-        # Podświetlenie weekendów/świąt (szare tło) w PDF
         if row['_is_red']:
             pdf.set_fill_color(240, 240, 240)
             fill = True
         else:
             fill = False
-            
         pdf.cell(40, 10, d_str, 1, 0, 'L', fill)
         pdf.cell(60, 10, day_str, 1, 0, 'L', fill)
         pdf.cell(80, 10, doc_str, 1, 1, 'L', fill)
-        
     return pdf.output(dest='S').encode('latin-1', 'replace')
 
 # --- CACHE I OPTYMALIZACJA ---
@@ -253,21 +231,17 @@ def _generate_single_schedule(dates, prefs_map, target_limits):
     weekly_counts = {}
     debug_info = {}
     
-    # 1. SZTYWNE DYŻURY (Fixed - PRIORYTET DLA GRUPY FIXED)
+    # 1. SZTYWNE DYŻURY (Fixed)
     for d in dates:
         d_str = d.strftime('%Y-%m-%d')
         day_prefs = prefs_map.get(d_str, {})
-        
         assigned_fixed = None
         
-        # A. Najpierw sprawdzamy grupę FIXED_DOCTORS (nadrzędni)
-        # Jeśli ktoś z nich ma fixed, wygrywa od razu.
+        # Priorytet dla Fixed
         for doc in FIXED_DOCTORS:
             if day_prefs.get(doc) == STATUS_FIXED:
                 assigned_fixed = doc
                 break
-        
-        # B. Dopiero jeśli nikt z nadrzędnych nie chce, sprawdzamy rotacyjnych
         if not assigned_fixed:
             for doc in ROTATION_DOCTORS:
                 if day_prefs.get(doc) == STATUS_FIXED:
@@ -282,9 +256,10 @@ def _generate_single_schedule(dates, prefs_map, target_limits):
             if wk not in weekly_counts: weekly_counts[wk] = {}
             weekly_counts[wk][assigned_fixed] = weekly_counts[wk].get(assigned_fixed, 0) + 1
 
-    # 2. ROTACJA (Reszta dni)
+    # 2. ROTACJA
     days_to_fill = [d for d in dates if d.strftime('%Y-%m-%d') not in schedule]
     
+    # Heurystyka: najpierw dni trudne (mało dostępnych)
     def count_availability(day_obj):
         d_s = day_obj.strftime('%Y-%m-%d')
         return sum(1 for doc in ROTATION_DOCTORS if prefs_map.get(d_s, {}).get(doc) != STATUS_UNAVAILABLE)
@@ -302,8 +277,9 @@ def _generate_single_schedule(dates, prefs_map, target_limits):
         next_day = (d + datetime.timedelta(days=1)).strftime('%Y-%m-%d')
 
         for doc in ROTATION_DOCTORS:
+            # Rejestrujemy powód odrzucenia dla każdego
             if stats[doc]['Total'] >= target_limits.get(doc, 0):
-                daily_rejections[doc] = "Limit wyczerpany"
+                daily_rejections[doc] = f"Limit({stats[doc]['Total']})"
                 continue
             
             status = prefs_map.get(d_str, {}).get(doc, STATUS_AVAILABLE)
@@ -368,8 +344,7 @@ def generate_optimized_schedule(dates, preferences_df, target_limits, attempts=5
         
         for group in ["Piątki", "Soboty", "Niedziele"]:
             counts = [sts[doc][group] for doc in ROTATION_DOCTORS]
-            if counts:
-                score -= (max(counts) - min(counts)) * 5
+            if counts: score -= (max(counts) - min(counts)) * 5
 
         if score > best_score:
             best_score = score
@@ -392,7 +367,6 @@ with st.sidebar:
     
     p_start, p_day = get_settlement_period_info(sel_year, start_m)
     st.info(f"Początek okresu: {p_start} ({p_day}).")
-    st.caption("v2.2 (Unicode Fix)")
     attempts_count = st.slider("Liczba prób (AI)", 10, 200, 50)
 
 tab1, tab2 = st.tabs(["📝 Dostępność", "🧮 Grafik"])
@@ -401,10 +375,8 @@ tab1, tab2 = st.tabs(["📝 Dostępność", "🧮 Grafik"])
 with tab1:
     st.subheader(f"Dostępność: {sel_period_name} {sel_year}")
     current_user = st.selectbox("Lekarz:", ALL_DOCTORS, index=2)
-    
     dates = get_period_dates(sel_year, start_m)
     df_db = load_data()
-    
     is_fixed_mode = current_user in FIXED_DOCTORS
     
     if is_fixed_mode:
@@ -417,79 +389,66 @@ with tab1:
                 if r['Status'] == STATUS_FIXED:
                     try:
                         d_obj = pd.to_datetime(r['Data']).date()
-                        if d_obj in dates:
-                            clean_data.append({"Data": d_obj, "Status": STATUS_FIXED})
+                        if d_obj in dates: clean_data.append({"Data": d_obj, "Status": STATUS_FIXED})
                     except: pass
         
         editor_df = pd.DataFrame(clean_data if clean_data else [], columns=["Data", "Status"])
-        config = {
-            "Data": st.column_config.DateColumn("Data Dyżuru", format="DD.MM.YYYY", required=True),
-            "Status": st.column_config.SelectboxColumn(disabled=True, default=STATUS_FIXED, options=[STATUS_FIXED])
-        }
-        num_rows = "dynamic"
+        edited_jakub = st.data_editor(
+            editor_df,
+            column_config={"Data": st.column_config.DateColumn("Data Dyżuru", format="DD.MM.YYYY", required=True), "Status": st.column_config.SelectboxColumn(disabled=True, default=STATUS_FIXED, options=[STATUS_FIXED])},
+            num_rows="dynamic", use_container_width=True, hide_index=True
+        )
         
+        if st.button(f"💾 Zapisz ({current_user})", type="primary"):
+            with st.spinner("Zapisywanie..."):
+                period_strs = [d.strftime('%Y-%m-%d') for d in dates]
+                new_rows = []
+                for _, row in edited_jakub.iterrows():
+                    try:
+                        d_val = pd.to_datetime(row['Data']).strftime('%Y-%m-%d')
+                        if d_val in period_strs: new_rows.append({"Data": d_val, "Lekarz": current_user, "Status": STATUS_FIXED})
+                    except: continue
+                final_new = pd.DataFrame(new_rows)
+                if df_db.empty: final_db = final_new
+                else:
+                    mask_remove = (df_db['Lekarz'] == current_user) & (df_db['Data'].isin(period_strs))
+                    df_cleaned = df_db[~mask_remove]
+                    final_db = pd.concat([df_cleaned, final_new], ignore_index=True)
+                if save_data(final_db): 
+                    st.success("Zapisano!")
+                    load_data.clear()
     else:
-        # Rotation mode
-        period_str_set = set(d.strftime('%Y-%m-%d') for d in dates)
         t_data = []
         for d in dates:
             d_str = d.strftime('%Y-%m-%d')
             status = STATUS_AVAILABLE
             if not df_db.empty:
                 entry = df_db[(df_db['Lekarz'] == current_user) & (df_db['Data'] == d_str)]
-                if not entry.empty:
-                    status = entry.iloc[0]['Status']
-            
+                if not entry.empty: status = entry.iloc[0]['Status']
             day_desc = get_day_description(d)
             m_name = "Msc 1" if d.month == start_m else "Msc 2"
             t_data.append({"Data": d, "Miesiąc": m_name, "Info": day_desc, "Status": status})
-            
-        editor_df = pd.DataFrame(t_data)
-        config = {
-            "Data": st.column_config.DateColumn(disabled=True, format="DD.MM.YYYY"),
-            "Miesiąc": st.column_config.TextColumn(disabled=True),
-            "Info": st.column_config.TextColumn(disabled=True, width="medium"),
-            "Status": st.column_config.SelectboxColumn("Decyzja", options=[STATUS_AVAILABLE, STATUS_RELUCTANT, STATUS_FIXED, STATUS_UNAVAILABLE], required=True)
-        }
-        num_rows = "fixed"
-
-    edited_data = st.data_editor(
-        editor_df,
-        column_config=config,
-        num_rows=num_rows,
-        use_container_width=True,
-        hide_index=True,
-        height=500
-    )
-    
-    if st.button(f"💾 Zapisz ({current_user})", type="primary"):
-        with st.spinner("Zapisywanie..."):
-            period_strs = [d.strftime('%Y-%m-%d') for d in dates]
-            new_rows = []
-            
-            for _, row in edited_data.iterrows():
-                try:
-                    d_val = pd.to_datetime(row['Data']).strftime('%Y-%m-%d')
-                    if is_fixed_mode:
-                        if d_val in period_strs:
-                            new_rows.append({"Data": d_val, "Lekarz": current_user, "Status": STATUS_FIXED})
-                    else:
+        
+        edited_df = st.data_editor(pd.DataFrame(t_data), column_config={"Data": st.column_config.DateColumn(disabled=True, format="DD.MM.YYYY"), "Miesiąc": st.column_config.TextColumn(disabled=True), "Info": st.column_config.TextColumn(disabled=True, width="medium"), "Status": st.column_config.SelectboxColumn("Decyzja", options=[STATUS_AVAILABLE, STATUS_RELUCTANT, STATUS_FIXED, STATUS_UNAVAILABLE], required=True)}, hide_index=True, height=500, use_container_width=True)
+        
+        if st.button(f"💾 Zapisz ({current_user})", type="primary"):
+            with st.spinner("Zapisywanie..."):
+                period_strs = [d.strftime('%Y-%m-%d') for d in dates]
+                new_rows = []
+                for _, row in edited_df.iterrows():
+                    try:
+                        d_val = pd.to_datetime(row['Data']).strftime('%Y-%m-%d')
                         new_rows.append({"Data": d_val, "Lekarz": current_user, "Status": row['Status']})
-                except Exception as e:
-                    continue
-
-            final_new = pd.DataFrame(new_rows)
-            
-            if df_db.empty:
-                final_db = final_new
-            else:
-                mask_remove = (df_db['Lekarz'] == current_user) & (df_db['Data'].isin(period_strs))
-                df_cleaned = df_db[~mask_remove]
-                final_db = pd.concat([df_cleaned, final_new], ignore_index=True)
-            
-            if save_data(final_db): 
-                st.success("Zapisano!")
-                load_data.clear()
+                    except: continue
+                final_new = pd.DataFrame(new_rows)
+                if df_db.empty: final_db = final_new
+                else:
+                    mask_remove = (df_db['Lekarz'] == current_user) & (df_db['Data'].isin(period_strs))
+                    df_cleaned = df_db[~mask_remove]
+                    final_db = pd.concat([df_cleaned, final_new], ignore_index=True)
+                if save_data(final_db): 
+                    st.success("Zapisano!")
+                    load_data.clear()
 
 # --- TAB 2: GENERATOR ---
 with tab2:
@@ -497,7 +456,6 @@ with tab2:
     all_prefs = load_data()
     dates_gen = get_period_dates(sel_year, start_m)
     
-    # Liczenie fixed
     fixed_counts_map = {doc: 0 for doc in ALL_DOCTORS}
     if not all_prefs.empty:
         d_strs = [d.strftime('%Y-%m-%d') for d in dates_gen]
@@ -508,20 +466,12 @@ with tab2:
 
     total_days = len(dates_gen)
     
-    st.subheader("Dyżury Ustalone (Fixed - Nadrzędne)")
+    st.subheader("Dyżury Ustalone (Fixed)")
     fixed_table_data = []
     for doc in FIXED_DOCTORS:
         fixed_table_data.append({"Lekarz": doc, "Z bazy": fixed_counts_map[doc], "Do Obliczeń": fixed_counts_map[doc]})
     
-    edited_fixed_table = st.data_editor(
-        pd.DataFrame(fixed_table_data),
-        column_config={
-            "Lekarz": st.column_config.TextColumn(disabled=True),
-            "Z bazy": st.column_config.NumberColumn(disabled=True),
-            "Do Obliczeń": st.column_config.NumberColumn(min_value=0, max_value=31, step=1)
-        },
-        hide_index=True, use_container_width=True
-    )
+    edited_fixed_table = st.data_editor(pd.DataFrame(fixed_table_data), column_config={"Lekarz": st.column_config.TextColumn(disabled=True), "Z bazy": st.column_config.NumberColumn(disabled=True), "Do Obliczeń": st.column_config.NumberColumn(min_value=0, max_value=31, step=1)}, hide_index=True, use_container_width=True)
     
     sum_fixed_table = edited_fixed_table["Do Obliczeń"].sum()
     sum_fixed_rotational = sum(fixed_counts_map[d] for d in ROTATION_DOCTORS)
@@ -544,11 +494,7 @@ with tab2:
         existing = fixed_counts_map[doc]
         lim_data.append({"Lekarz": doc, "Limit": sugg + existing})
         
-    edited_limits = st.data_editor(
-        pd.DataFrame(lim_data),
-        column_config={"Limit": st.column_config.NumberColumn(min_value=0, max_value=31, step=1)},
-        hide_index=True, use_container_width=True
-    )
+    edited_limits = st.data_editor(pd.DataFrame(lim_data), column_config={"Limit": st.column_config.NumberColumn(min_value=0, max_value=31, step=1)}, hide_index=True, use_container_width=True)
     
     current_rot_sum = edited_limits["Limit"].sum()
     total_planned = current_rot_sum + sum_fixed_table
@@ -573,35 +519,37 @@ with tab2:
                     "Data": d, "Info": get_day_description(d), 
                     "Dyżurny": assigned, "_is_red": is_free
                 })
-                if assigned == "BRAK" and d_s in dbg:
-                    fails.append(f"**{d.strftime('%d.%m')}**: " + ", ".join([f"{k}: {v}" for k,v in dbg[d_s].items()]))
+                # Zbieranie szczegółowych przyczyn dla nieobsadzonych dni
+                if assigned == "BRAK":
+                    if d_s in dbg and dbg[d_s]:
+                        # Formatowanie: Jędrzej: Limit, Filip: Niedostępny
+                        reason_str = ", ".join([f"**{k}**: {v}" for k,v in dbg[d_s].items()])
+                        fails.append(f"🔴 **{d.strftime('%d.%m')} ({get_day_description(d)}):** {reason_str}")
+                    else:
+                        fails.append(f"🔴 **{d.strftime('%d.%m')}:** Brak dostępnych lekarzy rotacyjnych (wszyscy niedostępni/zablokowani).")
 
             df_res = pd.DataFrame(res_rows)
             
-            # PDF Generation - Bezpieczne kodowanie
+            # --- SEKCJA BŁĘDÓW NA GÓRZE ---
+            if fails:
+                st.error("⚠️ UWAGA! Nie udało się obsadzić poniższych dni (najlepszy znaleziony wariant). Zwiększ limity lub dostępność:")
+                for f in fails:
+                    st.write(f) # st.write zamiast markdown dla lepszej czytelności długich linii
+                st.divider()
+            else:
+                st.balloons()
+            
+            # PDF
             try:
                 pdf_bytes = create_pdf_bytes(df_res, f"Grafik {sel_period_name} {sel_year}")
-                st.download_button(
-                    label="📥 Pobierz Grafik jako PDF",
-                    data=pdf_bytes,
-                    file_name=f"grafik_{sel_period_name}_{sel_year}.pdf",
-                    mime="application/pdf"
-                )
-            except Exception as e:
-                st.error(f"Błąd generowania PDF: {e}")
+                st.download_button(label="📥 Pobierz Grafik jako PDF", data=pdf_bytes, file_name=f"grafik_{sel_period_name}_{sel_year}.pdf", mime="application/pdf")
+            except Exception as e: st.error(f"Błąd PDF: {e}")
 
             def style_rows(row):
                 if row['Dyżurny'] == "BRAK": return ['background-color: #ffcccc; color: red; font-weight: bold'] * len(row)
                 return ['color: #D81B60; font-weight: bold'] * len(row) if row['_is_red'] else [''] * len(row)
 
-            st.dataframe(df_res.style.apply(style_rows, axis=1).format({"Data": lambda t: t.strftime("%Y-%m-%d")}), 
-                         use_container_width=True, height=600, column_config={"_is_red": None})
-            
-            if fails:
-                st.error("Nie udało się obsadzić dni (najlepszy wynik):")
-                for f in fails: st.markdown(f"- {f}")
-            else:
-                st.balloons()
+            st.dataframe(df_res.style.apply(style_rows, axis=1).format({"Data": lambda t: t.strftime("%Y-%m-%d")}), use_container_width=True, height=600, column_config={"_is_red": None})
             
             st.write("---")
             s_rows = [{"Lekarz": d, "Cel": targets.get(d,0), "Wynik": stats[d]['Total'], **{k:v for k,v in stats[d].items() if k!='Total'}} for d in ALL_DOCTORS]
