@@ -3,52 +3,44 @@ import pandas as pd
 import datetime
 import calendar
 import random
+import math
 from github import Github
 from io import StringIO
-from fpdf import FPDF # Biblioteka do PDF
+from fpdf import FPDF
 
 # --- KONFIGURACJA ZESPOŁU ---
 
-# Grupa PRIORYTETOWA (Fixed) - Ich "Sztywny Dyżur" nadpisuje wszystko inne
+# Grupa 1: Fixed (Nadrzędna) - Wybierają konkretne dni, nie biorą udziału w losowaniu reszty
 FIXED_DOCTORS = [
-    "Jakub Sz.", 
-    "Gerard", 
-    "Tomasz", 
-    "Rafał", 
-    "Marcin", 
-    "Weronika",
-    "Daniel"
+    "Jakub Sz.", "Gerard", "Tomasz", "Rafał", "Marcin", "Weronika", "Daniel"
 ]
 
-# Grupa ROTACYJNA - Biorą udział w losowaniu, ich "Fixed" jest ważny tylko gdy grupa wyżej nie zajęła dnia
+# Grupa 2: Rotacyjna - Biorą udział w losowaniu
 ROTATION_DOCTORS = [
-    "Jędrzej", 
-    "Filip", 
-    "Ihab", 
-    "Kacper", 
-    "Jakub", 
-    "Tymoteusz"
+    "Jędrzej", "Filip", "Ihab", "Kacper", "Jakub", "Tymoteusz"
 ]
 
 # Lekarze objęci limitem 48h (Bez Opt-Out)
+# Kacper i Daniel są tu wyłączeni (mogą przekraczać normę)
 NO_OPTOUT_DOCTORS = [
-    "Jędrzej",
-    "Filip",
-    "Ihab",
-    "Kacper",
-    "Jakub",
-    "Tymoteusz"
+    "Jędrzej", "Filip", "Ihab", "Jakub", "Tymoteusz"
 ]
+
+# Lekarze ze specjalną zasadą: Dyżur Sobota -> Wolny Poniedziałek
+SATURDAY_RULE_DOCTORS = ["Daniel", "Kacper"]
 
 ALL_DOCTORS = FIXED_DOCTORS + ROTATION_DOCTORS
 
-# Statusy
 STATUS_AVAILABLE = "Chcę dyżur (Dostępny)"
 STATUS_RELUCTANT = "Mogę (Niechętnie)"
 STATUS_UNAVAILABLE = "Niedostępny"
 STATUS_FIXED = "Sztywny Dyżur (Już ustalony)"
 
+REASONS = ["", "Urlop", "Kurs", "Inne"]
 DATA_FILE = "data.csv"
+
+# Definicja grup dni dla algorytmu sprawiedliwości
+DAY_GROUPS = ["Poniedziałki", "Wtorki/Środy", "Czwartki", "Piątki", "Soboty", "Niedziele"]
 
 # --- PDF GENERATOR ---
 
@@ -57,7 +49,6 @@ class PDF(FPDF):
         self.set_font('Arial', 'B', 14)
         self.cell(0, 10, 'Grafik Dyzurów - Urologia', 0, 1, 'C')
         self.ln(5)
-
     def footer(self):
         self.set_y(-15)
         self.set_font('Arial', 'I', 8)
@@ -70,12 +61,9 @@ def remove_pl_chars(text):
         'Ą': 'A', 'Ć': 'C', 'Ę': 'E', 'Ł': 'L', 'Ń': 'N', 'Ó': 'O', 'Ś': 'S', 'Ź': 'Z', 'Ż': 'Z',
         '🔴': ' ', '⚠️': '!', '✅': 'OK'
     }
-    for k, v in replacements.items():
-        text = text.replace(k, v)
-    try:
-        return text.encode('latin-1', 'replace').decode('latin-1')
-    except:
-        return "Tekst nieczytelny"
+    for k, v in replacements.items(): text = text.replace(k, v)
+    try: return text.encode('latin-1', 'replace').decode('latin-1')
+    except: return "?"
 
 def create_pdf_bytes(dataframe, title):
     pdf = PDF()
@@ -107,7 +95,7 @@ def create_pdf_bytes(dataframe, title):
         pdf.cell(80, 10, doc_str, 1, 1, 'L', fill)
     return pdf.output(dest='S').encode('latin-1', 'replace')
 
-# --- CACHE I OPTYMALIZACJA ---
+# --- DATA & LOGIC ---
 
 @st.cache_data(ttl=3600)
 def get_polish_holidays(year):
@@ -121,7 +109,7 @@ def get_polish_holidays(year):
     h = (19 * a + b - d - g + 15) % 30
     i = c // 4
     k = c % 4
-    l = (32 + 2 * e + 2 * i - h - k) // 7
+    l = (32 + 2 * e + 2 * i - h - k) % 7
     m = (a + 11 * h + 22 * l) // 451
     month = (h + l - 7 * m + 114) // 31
     day = ((h + l - 7 * m + 114) % 31) + 1
@@ -134,6 +122,7 @@ def get_polish_holidays(year):
         easter + datetime.timedelta(days=1): "Poniedziałek Wielkanocny",
         datetime.date(year, 5, 1): "Święto Pracy",
         datetime.date(year, 5, 3): "Święto Konstytucji 3 Maja",
+        easter + datetime.timedelta(days=49): "Zielone Świątki",
         easter + datetime.timedelta(days=60): "Boże Ciało",
         datetime.date(year, 8, 15): "Wniebowzięcie NMP",
         datetime.date(year, 11, 1): "Wszystkich Świętych",
@@ -152,13 +141,9 @@ def get_day_description(date_obj):
     days_pl = ["Pon", "Wt", "Śr", "Czw", "Pt", "Sob", "Niedz"]
     day_name = days_pl[date_obj.weekday()]
     holidays = get_polish_holidays(date_obj.year)
-    if date_obj in holidays:
-        return f"🔴 {day_name} ({holidays[date_obj]})"
-    elif date_obj.weekday() >= 5:
-        return f"🔴 {day_name}"
+    if date_obj in holidays: return f"🔴 {day_name} ({holidays[date_obj]})"
+    elif date_obj.weekday() >= 5: return f"🔴 {day_name}"
     return day_name
-
-# --- OBSŁUGA GITHUBA ---
 
 @st.cache_resource
 def get_repo():
@@ -167,8 +152,7 @@ def get_repo():
         g = Github(token)
         user = g.get_user()
         for repo in user.get_repos():
-             if any(x in repo.name.lower() for x in ["grafik", "urologia", "dyzury"]):
-                 return repo
+             if any(x in repo.name.lower() for x in ["grafik", "urologia", "dyzury"]): return repo
         return user.get_repos()[0]
     except Exception as e:
         st.error(f"Błąd GitHub: {e}")
@@ -177,52 +161,45 @@ def get_repo():
 @st.cache_data(ttl=60)
 def load_data():
     repo = get_repo()
-    if not repo: return pd.DataFrame(columns=["Data", "Lekarz", "Status"])
+    if not repo: return pd.DataFrame(columns=["Data", "Lekarz", "Status", "Przyczyna"])
     try:
-        contents = repo.get_contents(DATA_FILE)
-        csv_content = contents.decoded_content.decode("utf-8")
-        df = pd.read_csv(StringIO(csv_content))
-        df['Data'] = df['Data'].astype(str)
-        return df
-    except:
-        return pd.DataFrame(columns=["Data", "Lekarz", "Status"])
+        c = repo.get_contents(DATA_FILE)
+        df = pd.read_csv(StringIO(c.decoded_content.decode("utf-8"))).astype({'Data': str})
+        if 'Przyczyna' not in df.columns: df['Przyczyna'] = ""
+        return df.fillna("")
+    except: return pd.DataFrame(columns=["Data", "Lekarz", "Status", "Przyczyna"])
 
 def save_data(df):
     repo = get_repo()
     if not repo: return False
-    csv_content = df.to_csv(index=False)
+    if 'Przyczyna' not in df.columns: df['Przyczyna'] = ""
     try:
-        contents = repo.get_contents(DATA_FILE)
-        repo.update_file(contents.path, "Update data", csv_content, contents.sha)
+        c = repo.get_contents(DATA_FILE)
+        repo.update_file(c.path, "Update", df.to_csv(index=False), c.sha)
         return True
     except:
-        try:
-            repo.create_file(DATA_FILE, "Init data", csv_content)
-            return True
+        try: repo.create_file(DATA_FILE, "Init", df.to_csv(index=False)); return True
         except: return False
-
-# --- LOGIKA KALENDARZA ---
 
 def get_settlement_period_info(year, month):
     start_month = month if month % 2 != 0 else month - 1
     start_date = datetime.date(year, start_month, 1)
-    day_names_pl = ['Poniedziałek', 'Wtorek', 'Środa', 'Czwartek', 'Piątek', 'Sobota', 'Niedziela']
-    return start_date, day_names_pl[start_date.weekday()]
+    day_names = ['Poniedziałek', 'Wtorek', 'Środa', 'Czwartek', 'Piątek', 'Sobota', 'Niedziela']
+    return start_date, day_names[start_date.weekday()]
 
 def get_period_dates(year, start_month):
     dates = []
     for i in range(2):
-        curr_m = start_month + i
-        if curr_m <= 12:
-            num_days = calendar.monthrange(year, curr_m)[1]
-            dates.extend([datetime.date(year, curr_m, d) for d in range(1, num_days + 1)])
+        curr = start_month + i
+        if curr <= 12:
+            nd = calendar.monthrange(year, curr)[1]
+            dates.extend([datetime.date(year, curr, d) for d in range(1, nd + 1)])
     return dates
 
 def get_week_key(date_obj):
-    period_start_date, _ = get_settlement_period_info(date_obj.year, date_obj.month)
-    days_diff = (date_obj - period_start_date).days
-    week_index = days_diff // 7
-    return f"{date_obj.year}_M{period_start_date.month}_W{week_index}"
+    p_start, _ = get_settlement_period_info(date_obj.year, date_obj.month)
+    days = (date_obj - p_start).days
+    return f"{date_obj.year}_M{p_start.month}_W{days // 7}"
 
 def get_day_group(date_obj):
     wd = date_obj.weekday()
@@ -231,8 +208,7 @@ def get_day_group(date_obj):
     if wd == 3: return "Czwartki"
     if wd == 4: return "Piątki"
     if wd == 5: return "Soboty"
-    if wd == 6: return "Niedziele"
-    return "Inne"
+    return "Niedziele"
 
 # --- SILNIK GRAFIKU (CORE) ---
 
@@ -242,38 +218,40 @@ def _generate_single_schedule(dates, prefs_map, target_limits):
     weekly_counts = {}
     debug_info = {}
     
-    # 1. SZTYWNE DYŻURY (Fixed)
+    # 1. FIXED (PRIORYTET NADRZĘDNY)
     for d in dates:
         d_str = d.strftime('%Y-%m-%d')
         day_prefs = prefs_map.get(d_str, {})
-        assigned_fixed = None
+        assigned = None
         
-        # Priorytet dla Fixed
+        # Najpierw grupa Fixed (Jakub Sz., Gerard itd.)
         for doc in FIXED_DOCTORS:
-            if day_prefs.get(doc) == STATUS_FIXED:
-                assigned_fixed = doc
-                break
-        if not assigned_fixed:
-            for doc in ROTATION_DOCTORS:
-                if day_prefs.get(doc) == STATUS_FIXED:
-                    assigned_fixed = doc
-                    break
+            if day_prefs.get(doc, {}).get('Status') == STATUS_FIXED:
+                assigned = doc; break
         
-        if assigned_fixed:
-            schedule[d_str] = assigned_fixed
-            stats[assigned_fixed]['Total'] += 1
-            stats[assigned_fixed][get_day_group(d)] += 1
+        # Potem rotacyjni (jeśli ktoś z nich ma fixed)
+        if not assigned:
+            for doc in ROTATION_DOCTORS:
+                if day_prefs.get(doc, {}).get('Status') == STATUS_FIXED:
+                    assigned = doc; break
+        
+        if assigned:
+            schedule[d_str] = assigned
+            stats[assigned]['Total'] += 1
+            stats[assigned][get_day_group(d)] += 1
             wk = get_week_key(d)
             if wk not in weekly_counts: weekly_counts[wk] = {}
-            weekly_counts[wk][assigned_fixed] = weekly_counts[wk].get(assigned_fixed, 0) + 1
+            weekly_counts[wk][assigned] = weekly_counts[wk].get(assigned, 0) + 1
 
     # 2. ROTACJA
     days_to_fill = [d for d in dates if d.strftime('%Y-%m-%d') not in schedule]
     
     def count_availability(day_obj):
         d_s = day_obj.strftime('%Y-%m-%d')
-        return sum(1 for doc in ROTATION_DOCTORS if prefs_map.get(d_s, {}).get(doc) != STATUS_UNAVAILABLE)
+        # Zliczamy ilu lekarzy rotacyjnych NIE jest niedostępnych
+        return sum(1 for doc in ROTATION_DOCTORS if prefs_map.get(d_s, {}).get(doc, {}).get('Status') != STATUS_UNAVAILABLE)
 
+    # Sortujemy: najpierw trudne (rosnąco), potem losowo
     days_to_fill.sort(key=lambda x: (count_availability(x), random.random()))
     
     for d in days_to_fill:
@@ -281,40 +259,29 @@ def _generate_single_schedule(dates, prefs_map, target_limits):
         wk = get_week_key(d)
         group = get_day_group(d)
         candidates = []
-        daily_rejections = {}
-
-        prev_day = (d - datetime.timedelta(days=1)).strftime('%Y-%m-%d')
-        next_day = (d + datetime.timedelta(days=1)).strftime('%Y-%m-%d')
+        rej = {}
+        prev = (d - datetime.timedelta(days=1)).strftime('%Y-%m-%d')
+        next_d = (d + datetime.timedelta(days=1)).strftime('%Y-%m-%d')
 
         for doc in ROTATION_DOCTORS:
-            if stats[doc]['Total'] >= target_limits.get(doc, 0):
-                daily_rejections[doc] = f"Limit({stats[doc]['Total']})"
-                continue
-            
-            status = prefs_map.get(d_str, {}).get(doc, STATUS_AVAILABLE)
-            if status == STATUS_UNAVAILABLE: 
-                daily_rejections[doc] = "Niedostępny"
-                continue
-            
-            if schedule.get(prev_day) == doc: 
-                daily_rejections[doc] = "Po dyżurze"
-                continue
-            
-            if schedule.get(next_day) == doc: 
-                daily_rejections[doc] = "Przed dyżurem"
-                continue
-            
-            if weekly_counts.get(wk, {}).get(doc, 0) >= 2: 
-                daily_rejections[doc] = "Limit tyg."
-                continue
+            if stats[doc]['Total'] >= target_limits.get(doc, 0): rej[doc] = "Limit"; continue
+            if prefs_map.get(d_str, {}).get(doc, {}).get('Status') == STATUS_UNAVAILABLE: rej[doc] = "ND"; continue
+            if schedule.get(prev) == doc: rej[doc] = "Po"; continue
+            if schedule.get(next_d) == doc: rej[doc] = "Przed"; continue
+            if weekly_counts.get(wk, {}).get(doc, 0) >= 2: rej[doc] = "Max2"; continue
 
-            weight = 10 if status == STATUS_AVAILABLE else 1
-            candidates.append({
-                'name': doc, 'weight': weight, 'group_count': stats[doc][group], 'total_count': stats[doc]['Total']
-            })
+            # Wagi
+            w = 10 if prefs_map.get(d_str, {}).get(doc, {}).get('Status') == STATUS_AVAILABLE else 1
+            # Sortowanie: chcemy wyrównać grupę dni (np. poniedziałki)
+            candidates.append({'name': doc, 'w': w, 'gc': stats[doc][group], 'tc': stats[doc]['Total']})
 
         if candidates:
-            candidates.sort(key=lambda x: (-x['weight'], x['group_count'], x['total_count'], random.random()))
+            # Sortowanie kandydatów:
+            # 1. Preferencja (w) malejąco
+            # 2. Liczba dyżurów w TEJ grupie (gc) rosnąco - wyrównuje dni typu "Piątek"
+            # 3. Liczba dyżurów ogółem (tc) rosnąco
+            # 4. Losowo
+            candidates.sort(key=lambda x: (-x['w'], x['gc'], x['tc'], random.random()))
             chosen = candidates[0]['name']
             schedule[d_str] = chosen
             stats[chosen]['Total'] += 1
@@ -323,43 +290,159 @@ def _generate_single_schedule(dates, prefs_map, target_limits):
             weekly_counts[wk][chosen] = weekly_counts[wk].get(chosen, 0) + 1
         else:
             schedule[d_str] = "BRAK"
-            debug_info[d_str] = daily_rejections
+            debug_info[d_str] = rej
 
     return schedule, stats, debug_info
 
-def generate_optimized_schedule(dates, preferences_df, target_limits, attempts=50):
-    best_result = None
+def generate_optimized(dates, df, limits, attempts=50):
+    best_res = None
     best_score = -float('inf')
     
     prefs_map = {}
-    if not preferences_df.empty:
-        for row in preferences_df.to_dict('records'):
-            d_str = str(row['Data'])
-            if d_str not in prefs_map: prefs_map[d_str] = {}
-            prefs_map[d_str][row['Lekarz']] = row['Status']
+    if not df.empty:
+        for r in df.to_dict('records'):
+            if r['Data'] not in prefs_map: prefs_map[r['Data']] = {}
+            prefs_map[r['Data']][r['Lekarz']] = {'Status': r['Status'], 'Przyczyna': r.get('Przyczyna', '')}
 
     for _ in range(attempts):
-        sch, sts, dbg = _generate_single_schedule(dates, prefs_map, target_limits)
+        sch, sts, dbg = _generate_single_schedule(dates, prefs_map, limits)
         
+        # System Punktacji (Scoring)
         score = 0
         filled_days = sum(1 for v in sch.values() if v != "BRAK")
-        score += filled_days * 1000 
+        score += filled_days * 10000 # Priorytet: pełny grafik
         
+        # Premia za preferencje
         for d_str, doc in sch.items():
             if doc in ROTATION_DOCTORS and doc != "BRAK":
-                status = prefs_map.get(d_str, {}).get(doc, STATUS_AVAILABLE)
-                if status == STATUS_AVAILABLE: score += 10
-                elif status == STATUS_RELUCTANT: score += 1
+                s = prefs_map.get(d_str, {}).get(doc, {}).get('Status', STATUS_AVAILABLE)
+                if s == STATUS_AVAILABLE: score += 100
+                elif s == STATUS_RELUCTANT: score += 10
         
-        for group in ["Piątki", "Soboty", "Niedziele"]:
-            counts = [sts[doc][group] for doc in ROTATION_DOCTORS]
-            if counts: score -= (max(counts) - min(counts)) * 5
+        # Kara za nierówność WE WSZYSTKICH grupach dni (Sprawiedliwość Grupowa)
+        # Sprawdzamy każdą grupę: Pon, Wt/Śr, Czw, Pt, Sob, Niedz
+        for g in DAY_GROUPS:
+            cnts = [sts[d][g] for d in ROTATION_DOCTORS]
+            if cnts:
+                # Kara za rozrzut (różnica między max a min)
+                diff = max(cnts) - min(cnts)
+                # Wysoka kara, żeby wymusić równość
+                score -= diff * 50
 
         if score > best_score:
             best_score = score
-            best_result = (sch, sts, dbg, score)
+            best_res = (sch, sts, dbg, score)
     
-    return best_result
+    # RATUNEK (Deep Search): Jeśli najlepszy wynik nadal ma dziury, spróbuj jeszcze raz
+    if best_res:
+        sch, _, _, _ = best_res
+        if "BRAK" in sch.values():
+            # Extra effort
+            for _ in range(50):
+                sch2, sts2, dbg2 = _generate_single_schedule(dates, prefs_map, limits)
+                if "BRAK" not in sch2.values():
+                    # Znaleziono pełny, nawet jeśli mniej optymalny punktowo
+                    return (sch2, sts2, dbg2, 0)
+                    
+    return best_res
+
+# --- HARMONOGRAM DZIENNY ---
+
+def generate_daily_work(dates, duty_schedule, preferences_df):
+    daily_doctors = [d for d in ALL_DOCTORS if d != "Jakub Sz."]
+    schedule_map = {d.strftime('%Y-%m-%d'): {doc: "" for doc in daily_doctors} for d in dates}
+    
+    prefs_lookup = {}
+    if not preferences_df.empty:
+        for r in preferences_df.to_dict('records'):
+            d = r['Data']; doc = r['Lekarz']
+            if d not in prefs_lookup: prefs_lookup[d] = {}
+            prefs_lookup[d][doc] = {'Status': r['Status'], 'Przyczyna': r.get('Przyczyna', '')}
+
+    def set_status(date_obj, doc, status):
+        schedule_map[date_obj.strftime('%Y-%m-%d')][doc] = status
+    def get_status(date_obj, doc):
+        return schedule_map[date_obj.strftime('%Y-%m-%d')][doc]
+
+    weeks = {}
+    for d in dates:
+        wk = get_week_key(d)
+        if wk not in weeks: weeks[wk] = []
+        weeks[wk].append(d)
+
+    norma = 7 + (35/60)
+
+    for wk, week_dates in weeks.items():
+        daily_staff_count = {d.strftime('%Y-%m-%d'): 0 for d in week_dates}
+        doc_shift_hours = {doc: 0.0 for doc in daily_doctors}
+
+        # Faza 1: Sztywne reguły
+        for d in week_dates:
+            d_s = d.strftime('%Y-%m-%d')
+            prev_d = d - datetime.timedelta(days=1)
+            prev_d_s = prev_d.strftime('%Y-%m-%d')
+            is_red = is_red_day(d)
+            
+            duty = duty_schedule.get(d_s)
+            duty_prev = duty_schedule.get(prev_d_s)
+
+            for doc in daily_doctors:
+                user_prefs = prefs_lookup.get(d_s, {}).get(doc, {})
+                status_pref = user_prefs.get('Status')
+                reason = user_prefs.get('Przyczyna')
+                
+                if status_pref == STATUS_UNAVAILABLE and reason in ["Urlop", "Kurs"]:
+                    set_status(d, doc, reason)
+                elif duty == doc:
+                    set_status(d, doc, "DYŻUR 24h")
+                    doc_shift_hours[doc] += 24.0
+                elif duty_prev == doc:
+                    set_status(d, doc, "ZEJŚCIE")
+                elif is_red:
+                    set_status(d, doc, "Wolne")
+                elif doc in SATURDAY_RULE_DOCTORS and d.weekday() == 0: 
+                    last_sat = d - datetime.timedelta(days=2)
+                    if duty_schedule.get(last_sat.strftime('%Y-%m-%d')) == doc:
+                        set_status(d, doc, "Wolne (za sobotę)")
+                    else:
+                        set_status(d, doc, "TBD")
+                else:
+                    set_status(d, doc, "TBD")
+
+        # Faza 2: Obsada i Limit 48h
+        for d in week_dates:
+            count = sum(1 for doc in daily_doctors if get_status(d, doc) == "TBD")
+            daily_staff_count[d.strftime('%Y-%m-%d')] = count
+
+        for doc in NO_OPTOUT_DOCTORS:
+            if doc not in daily_doctors: continue
+            remaining = 48.0 - doc_shift_hours[doc]
+            max_days = int(remaining // norma)
+            
+            candidates = [d for d in week_dates if get_status(d, doc) == "TBD"]
+            if len(candidates) <= max_days:
+                for d in candidates: set_status(d, doc, "7:30 - 15:05")
+            else:
+                # Wybieramy dni wolne tam, gdzie jest największa obsada
+                candidates.sort(key=lambda x: daily_staff_count[x.strftime('%Y-%m-%d')], reverse=True)
+                num_to_drop = len(candidates) - max_days
+                for d in candidates[:num_to_drop]:
+                    set_status(d, doc, "Wolne (48h)")
+                    daily_staff_count[d.strftime('%Y-%m-%d')] -= 1
+                for d in candidates[num_to_drop:]:
+                    set_status(d, doc, "7:30 - 15:05")
+
+        # Faza 3: Reszta
+        for doc in daily_doctors:
+            for d in week_dates:
+                if get_status(d, doc) == "TBD": set_status(d, doc, "7:30 - 15:05")
+
+    final_data = []
+    for d in dates:
+        row = {"Data": d, "Dzień": get_day_description(d), "_is_red": is_red_day(d)}
+        for doc in daily_doctors: row[doc] = schedule_map[d.strftime('%Y-%m-%d')][doc]
+        final_data.append(row)
+    return pd.DataFrame(final_data)
 
 # --- UI ---
 st.set_page_config(page_title="Grafik Urologia", layout="wide", page_icon="🏥")
@@ -370,17 +453,16 @@ with st.sidebar:
     periods = ["Styczeń - Luty", "Marzec - Kwiecień", "Maj - Czerwiec", "Lipiec - Sierpień", "Wrzesień - Październik", "Listopad - Grudzień"]
     today = datetime.date.today()
     default_idx = (today.month - 1) // 2
-    sel_period_name = st.selectbox("Okres Rozliczeniowy", periods, index=default_idx)
+    sel_period_name = st.selectbox("Okres", periods, index=default_idx)
     sel_year = st.number_input("Rok", 2025, 2030, today.year)
     start_m = {"Styczeń - Luty": 1, "Marzec - Kwiecień": 3, "Maj - Czerwiec": 5, "Lipiec - Sierpień": 7, "Wrzesień - Październik": 9, "Listopad - Grudzień": 11}[sel_period_name]
     
     p_start, p_day = get_settlement_period_info(sel_year, start_m)
-    st.info(f"Początek okresu: {p_start} ({p_day}).")
-    attempts_count = st.slider("Liczba prób (AI)", 10, 200, 50)
+    st.info(f"Start: {p_start} ({p_day}).")
+    attempts_count = st.slider("Próby AI", 10, 500, 100)
 
 tab1, tab2 = st.tabs(["📝 Dostępność", "🧮 Grafik"])
 
-# --- TAB 1 ---
 with tab1:
     st.subheader(f"Dostępność: {sel_period_name} {sel_year}")
     current_user = st.selectbox("Lekarz:", ALL_DOCTORS, index=2)
@@ -389,256 +471,151 @@ with tab1:
     is_fixed_mode = current_user in FIXED_DOCTORS
     
     if is_fixed_mode:
-        st.info("👋 Tryb 'Fixed' (Nadrzędny). Kliknij '+', aby dodać dzień.")
+        st.info("Tryb Fixed. Dodaj tylko dni dyżurowe.")
         mask_user = (df_db['Lekarz'] == current_user)
         clean_data = []
         if not df_db.empty:
-            user_entries = df_db[mask_user]
-            for _, r in user_entries.iterrows():
+            for _, r in df_db[mask_user].iterrows():
                 if r['Status'] == STATUS_FIXED:
                     try:
-                        d_obj = pd.to_datetime(r['Data']).date()
-                        if d_obj in dates: clean_data.append({"Data": d_obj, "Status": STATUS_FIXED})
+                        d = pd.to_datetime(r['Data']).date()
+                        if d in dates: clean_data.append({"Data": d, "Status": STATUS_FIXED})
                     except: pass
         
-        editor_df = pd.DataFrame(clean_data if clean_data else [], columns=["Data", "Status"])
-        edited_jakub = st.data_editor(
-            editor_df,
-            column_config={"Data": st.column_config.DateColumn("Data Dyżuru", format="DD.MM.YYYY", required=True), "Status": st.column_config.SelectboxColumn(disabled=True, default=STATUS_FIXED, options=[STATUS_FIXED])},
-            num_rows="dynamic", use_container_width=True, hide_index=True
-        )
-        
-        if st.button(f"💾 Zapisz ({current_user})", type="primary"):
-            with st.spinner("Zapisywanie..."):
-                period_strs = [d.strftime('%Y-%m-%d') for d in dates]
-                new_rows = []
-                for _, row in edited_jakub.iterrows():
+        editor = st.data_editor(pd.DataFrame(clean_data, columns=["Data", "Status"]), column_config={"Data": st.column_config.DateColumn(format="DD.MM.YYYY", required=True), "Status": st.column_config.SelectboxColumn(disabled=True, default=STATUS_FIXED, options=[STATUS_FIXED])}, num_rows="dynamic", use_container_width=True, hide_index=True)
+        if st.button("Zapisz", type="primary"):
+            with st.spinner("Zapis..."):
+                p_strs = [d.strftime('%Y-%m-%d') for d in dates]
+                new_r = []
+                for _, r in editor.iterrows():
                     try:
-                        d_val = pd.to_datetime(row['Data']).strftime('%Y-%m-%d')
-                        if d_val in period_strs: new_rows.append({"Data": d_val, "Lekarz": current_user, "Status": STATUS_FIXED})
+                        dv = pd.to_datetime(r['Data']).strftime('%Y-%m-%d')
+                        if dv in p_strs: new_r.append({"Data": dv, "Lekarz": current_user, "Status": STATUS_FIXED, "Przyczyna": ""})
                     except: continue
-                final_new = pd.DataFrame(new_rows)
-                if df_db.empty: final_db = final_new
-                else:
-                    mask_remove = (df_db['Lekarz'] == current_user) & (df_db['Data'].isin(period_strs))
-                    df_cleaned = df_db[~mask_remove]
-                    final_db = pd.concat([df_cleaned, final_new], ignore_index=True)
-                if save_data(final_db): 
-                    st.success("Zapisano!")
-                    load_data.clear()
+                final = pd.DataFrame(new_r)
+                if not df_db.empty:
+                    df_cl = df_db[~((df_db['Lekarz'] == current_user) & (df_db['Data'].isin(p_strs)))]
+                    final = pd.concat([df_cl, final], ignore_index=True)
+                if save_data(final): st.success("OK!"); load_data.clear()
     else:
         t_data = []
         for d in dates:
-            d_str = d.strftime('%Y-%m-%d')
-            status = STATUS_AVAILABLE
+            d_s = d.strftime('%Y-%m-%d')
+            s = STATUS_AVAILABLE; r_val = ""
             if not df_db.empty:
-                entry = df_db[(df_db['Lekarz'] == current_user) & (df_db['Data'] == d_str)]
-                if not entry.empty: status = entry.iloc[0]['Status']
-            day_desc = get_day_description(d)
-            m_name = "Msc 1" if d.month == start_m else "Msc 2"
-            t_data.append({"Data": d, "Miesiąc": m_name, "Info": day_desc, "Status": status})
+                e = df_db[(df_db['Lekarz'] == current_user) & (df_db['Data'] == d_s)]
+                if not e.empty: s = e.iloc[0]['Status']; r_val = e.iloc[0].get('Przyczyna', '')
+            t_data.append({"Data": d, "Info": get_day_description(d), "Status": s, "Przyczyna": r_val})
         
-        edited_df = st.data_editor(pd.DataFrame(t_data), column_config={"Data": st.column_config.DateColumn(disabled=True, format="DD.MM.YYYY"), "Miesiąc": st.column_config.TextColumn(disabled=True), "Info": st.column_config.TextColumn(disabled=True, width="medium"), "Status": st.column_config.SelectboxColumn("Decyzja", options=[STATUS_AVAILABLE, STATUS_RELUCTANT, STATUS_FIXED, STATUS_UNAVAILABLE], required=True)}, hide_index=True, height=500, use_container_width=True)
-        
-        if st.button(f"💾 Zapisz ({current_user})", type="primary"):
-            with st.spinner("Zapisywanie..."):
-                period_strs = [d.strftime('%Y-%m-%d') for d in dates]
-                new_rows = []
-                for _, row in edited_df.iterrows():
+        editor = st.data_editor(pd.DataFrame(t_data), column_config={"Data": st.column_config.DateColumn(disabled=True, format="DD.MM.YYYY"), "Info": st.column_config.TextColumn(disabled=True), "Status": st.column_config.SelectboxColumn(options=[STATUS_AVAILABLE, STATUS_RELUCTANT, STATUS_FIXED, STATUS_UNAVAILABLE], required=True), "Przyczyna": st.column_config.SelectboxColumn(options=REASONS)}, height=500, use_container_width=True, hide_index=True)
+        if st.button("Zapisz", type="primary"):
+            with st.spinner("Zapis..."):
+                p_strs = [d.strftime('%Y-%m-%d') for d in dates]
+                new_r = []
+                for _, r in editor.iterrows():
                     try:
-                        d_val = pd.to_datetime(row['Data']).strftime('%Y-%m-%d')
-                        new_rows.append({"Data": d_val, "Lekarz": current_user, "Status": row['Status']})
+                        dv = pd.to_datetime(r['Data']).strftime('%Y-%m-%d')
+                        new_r.append({"Data": dv, "Lekarz": current_user, "Status": r['Status'], "Przyczyna": r['Przyczyna']})
                     except: continue
-                final_new = pd.DataFrame(new_rows)
-                if df_db.empty: final_db = final_new
-                else:
-                    mask_remove = (df_db['Lekarz'] == current_user) & (df_db['Data'].isin(period_strs))
-                    df_cleaned = df_db[~mask_remove]
-                    final_db = pd.concat([df_cleaned, final_new], ignore_index=True)
-                if save_data(final_db): 
-                    st.success("Zapisano!")
-                    load_data.clear()
+                final = pd.DataFrame(new_r)
+                if not df_db.empty:
+                    df_cl = df_db[~((df_db['Lekarz'] == current_user) & (df_db['Data'].isin(p_strs)))]
+                    final = pd.concat([df_cl, final], ignore_index=True)
+                if save_data(final): st.success("OK!"); load_data.clear()
 
-# --- TAB 2: GENERATOR ---
 with tab2:
-    st.header("Generator Grafiku")
+    st.header("Generator")
     all_prefs = load_data()
     dates_gen = get_period_dates(sel_year, start_m)
     
-    fixed_counts_map = {doc: 0 for doc in ALL_DOCTORS}
+    fixed_counts = {doc: 0 for doc in ALL_DOCTORS}
     if not all_prefs.empty:
         d_strs = [d.strftime('%Y-%m-%d') for d in dates_gen]
-        period_data = all_prefs[all_prefs['Data'].isin(d_strs)]
+        p_data = all_prefs[all_prefs['Data'].isin(d_strs)]
         for doc in ALL_DOCTORS:
-            cnt = len(period_data[(period_data['Lekarz'] == doc) & (period_data['Status'] == STATUS_FIXED)])
-            fixed_counts_map[doc] = cnt
+            fixed_counts[doc] = len(p_data[(p_data['Lekarz'] == doc) & (p_data['Status'] == STATUS_FIXED)])
 
     total_days = len(dates_gen)
     
-    st.subheader("Dyżury Ustalone (Fixed)")
-    fixed_table_data = []
-    for doc in FIXED_DOCTORS:
-        fixed_table_data.append({"Lekarz": doc, "Liczba Dyżurów": fixed_counts_map[doc]})
+    st.subheader("1. Dyżury Ustalone (Fixed)")
+    fixed_df = pd.DataFrame([{"Lekarz": d, "Liczba Dyżurów": fixed_counts[d]} for d in FIXED_DOCTORS])
+    ed_fixed = st.data_editor(fixed_df, column_config={"Lekarz": st.column_config.TextColumn(disabled=True)}, hide_index=True, use_container_width=True)
     
-    edited_fixed_table = st.data_editor(
-        pd.DataFrame(fixed_table_data),
-        column_config={
-            "Lekarz": st.column_config.TextColumn(disabled=True),
-            "Liczba Dyżurów": st.column_config.NumberColumn(min_value=0, max_value=31, step=1)
-        },
-        hide_index=True, 
-        use_container_width=True
-    )
-    
-    sum_fixed_table = edited_fixed_table["Liczba Dyżurów"].sum()
-    # Tutaj liczymy sumę fixed dla rotacyjnych, żeby dobrze odjąć od puli
-    sum_fixed_rotational = sum(fixed_counts_map[d] for d in ROTATION_DOCTORS)
-    
-    # Cała pula dni zajętych przez Fixed Group
-    days_taken_by_fixed_group = sum_fixed_table
-    
-    # Pula dla grupy rotacyjnej (wszystkie dni - dni zajęte przez grupę fixed)
-    pool_for_rotation = total_days - days_taken_by_fixed_group
+    sum_fixed = ed_fixed["Liczba Dyżurów"].sum() + sum(fixed_counts[d] for d in ROTATION_DOCTORS)
+    pool = total_days - sum_fixed
     
     col1, col2, col3 = st.columns(3)
-    col1.metric("Dni w okresie", total_days)
-    col2.metric("Zajęte przez Grupę Fixed", days_taken_by_fixed_group)
-    col3.metric("Dla Grupy Rotacyjnej", max(0, pool_for_rotation))
+    col1.metric("Wszystkie dni", total_days)
+    col2.metric("Zajęte (Fixed)", sum_fixed)
+    col3.metric("Dla Rotacji", max(0, pool))
     
-    st.subheader("Limity Rotacyjne")
-    st.caption("Domyślnie dzielę pulę dni równo. Jeśli zostaną resztki, musisz dodać je ręcznie wybranym lekarzom, aż bilans się zgodzi.")
+    st.subheader("2. Limity Rotacyjne")
+    ts = len(ROTATION_DOCTORS)
+    base = max(0, pool) // ts if ts else 0
+    rot_df = pd.DataFrame([{"Lekarz": d, "Limit": base} for d in ROTATION_DOCTORS])
+    ed_rot = st.data_editor(rot_df, column_config={"Limit": st.column_config.NumberColumn(step=1)}, hide_index=True, use_container_width=True)
     
-    team_size = len(ROTATION_DOCTORS)
-    # POPRAWKA 2: Dzielimy pulę dostępną dla grupy rotacyjnej po równo
-    # Każdy dostaje tyle samo, niezależnie czy ma już jakiś fixed wewnątrz grupy.
-    base = max(0, pool_for_rotation) // team_size if team_size else 0
+    planned = ed_rot["Limit"].sum() + ed_fixed["Liczba Dyżurów"].sum()
     
-    lim_data = []
-    for i, doc in enumerate(ROTATION_DOCTORS):
-        lim_data.append({"Lekarz": doc, "Limit": base})
-        
-    edited_limits = st.data_editor(pd.DataFrame(lim_data), column_config={"Limit": st.column_config.NumberColumn(min_value=0, max_value=31, step=1)}, hide_index=True, use_container_width=True)
-    
-    current_rot_sum = edited_limits["Limit"].sum()
-    # Sprawdzamy czy (Suma Limitów Rotacyjnych + Suma Fixed Group) == Total Days
-    total_planned = current_rot_sum + sum_fixed_table
-    
-    if total_planned == total_days:
-        st.success("Bilans się zgadza.")
-        if st.button("🚀 GENERUJ", type="primary"):
-            targets = {}
-            for _, r in edited_limits.iterrows(): targets[r['Lekarz']] = r['Limit']
-            for _, r in edited_fixed_table.iterrows(): targets[r['Lekarz']] = r['Liczba Dyżurów']
+    if planned == total_days:
+        st.success("Bilans zgodny.")
+        if st.button("🚀 GENERUJ GRAFIKI", type="primary"):
+            limits = {}
+            for _, r in ed_rot.iterrows(): limits[r['Lekarz']] = r['Limit']
+            for _, r in ed_fixed.iterrows(): limits[r['Lekarz']] = r['Liczba Dyżurów']
             
-            with st.spinner(f"Symulacja {attempts_count} wariantów..."):
-                sch, stats, dbg, score = generate_optimized_schedule(dates_gen, all_prefs, targets, attempts_count)
+            with st.spinner("Symulacja..."):
+                sch, stats, dbg, sc = generate_optimized(dates_gen, all_prefs, limits, attempts_count)
             
-            res_rows = []
-            fails = []
-            
-            weekly_shifts = {} 
-            
+            st.markdown("### 📅 Tabela 1: Grafik Dyżurowy")
+            res, fails = [], []
             for d in dates_gen:
-                is_free = is_red_day(d)
                 d_s = d.strftime('%Y-%m-%d')
-                assigned = sch.get(d_s, "BRAK")
-                res_rows.append({
-                    "Data": d, "Info": get_day_description(d), 
-                    "Dyżurny": assigned, "_is_red": is_free
-                })
-                
-                if assigned in NO_OPTOUT_DOCTORS:
-                    wk = get_week_key(d)
-                    if wk not in weekly_shifts: weekly_shifts[wk] = {}
-                    weekly_shifts[wk][assigned] = weekly_shifts[wk].get(assigned, 0) + 1
-
-                if assigned == "BRAK":
-                    if d_s in dbg and dbg[d_s]:
-                        reason_str = ", ".join([f"**{k}**: {v}" for k,v in dbg[d_s].items()])
-                        fails.append(f"🔴 **{d.strftime('%d.%m')} ({get_day_description(d)}):** {reason_str}")
-                    else:
-                        fails.append(f"🔴 **{d.strftime('%d.%m')}:** Brak dostępnych lekarzy rotacyjnych.")
-
-            df_res = pd.DataFrame(res_rows)
+                ass = sch.get(d_s, "BRAK")
+                res.append({"Data": d, "Info": get_day_description(d), "Dyżurny": ass, "_is_red": is_red_day(d)})
+                if ass == "BRAK":
+                    f_info = ", ".join([f"{k}:{v}" for k,v in dbg[d_s].items()]) if d_s in dbg else "Brak chętnych"
+                    fails.append(f"{d.strftime('%d.%m')}: {f_info}")
             
-            if fails:
-                st.error("⚠️ UWAGA! Nie udało się obsadzić poniższych dni:")
+            df_res = pd.DataFrame(res)
+            if fails: 
+                st.error("Błędy obsady:")
                 for f in fails: st.write(f)
-                st.divider()
-            else:
-                st.balloons()
+            else: st.balloons()
+
+            def style_dyzur(r):
+                if r['Dyżurny'] == "BRAK": return ['background-color: #ffcccc; color: red; font-weight: bold'] * len(r)
+                return ['color: #D81B60; font-weight: bold'] * len(r) if r['_is_red'] else [''] * len(r)
+
+            st.dataframe(df_res.style.apply(style_dyzur, axis=1).format({"Data": lambda t: t.strftime("%Y-%m-%d")}), use_container_width=True, height=500, column_config={"_is_red": None})
             
             try:
-                pdf_bytes = create_pdf_bytes(df_res, f"Grafik {sel_period_name} {sel_year}")
-                st.download_button(label="📥 Pobierz Grafik jako PDF", data=pdf_bytes, file_name=f"grafik_{sel_period_name}_{sel_year}.pdf", mime="application/pdf")
-            except Exception as e: st.error(f"Błąd PDF: {e}")
+                pdf = create_pdf_bytes(df_res, f"Grafik {sel_period_name}")
+                st.download_button("📥 PDF (Dyżury)", pdf, "grafik.pdf", "application/pdf")
+            except: pass
 
-            def style_rows(row):
-                if row['Dyżurny'] == "BRAK": return ['background-color: #ffcccc; color: red; font-weight: bold'] * len(row)
-                return ['color: #D81B60; font-weight: bold'] * len(row) if row['_is_red'] else [''] * len(row)
-
-            st.dataframe(df_res.style.apply(style_rows, axis=1).format({"Data": lambda t: t.strftime("%Y-%m-%d")}), use_container_width=True, height=600, column_config={"_is_red": None})
-            
-            st.write("---")
-            st.subheader("Statystyki")
             s_rows = []
-            for d in ALL_DOCTORS:
-                goal = targets.get(d, 0)
-                row = {
-                    "Lekarz": d, 
-                    "Cel": goal, 
-                    "Wynik": int(stats[d]['Total']) # Konwersja na int, żeby nie było 5.0
-                }
-                # Dodajemy szczegóły TYLKO dla lekarzy ROTACYJNYCH
-                if d in ROTATION_DOCTORS:
-                    for k, v in stats[d].items():
-                        if k != 'Total':
-                            row[k] = "-" if d in FIXED_DOCTORS else int(v) # Na wszelki wypadek, ale tu wejdzie tylko rotacja
-                # Dla Fixed wstawiamy myślniki w kolumnach dni
-                else:
-                    for group in ["Poniedziałki", "Wtorki/Środy", "Czwartki", "Piątki", "Soboty", "Niedziele"]:
-                        row[group] = "-"
-                        
+            for d in ROTATION_DOCTORS:
+                row = {"Lekarz": d, "Cel": limits.get(d,0), "Wynik": int(stats[d]['Total'])}
+                for k,v in stats[d].items(): 
+                    if k!='Total': row[k] = int(v)
                 s_rows.append(row)
-
-            # fillna("") dla estetyki
             st.dataframe(pd.DataFrame(s_rows).fillna("-"), hide_index=True)
-            
-            st.write("---")
-            st.subheader("Analiza Kodeksowa (Limit 48h)")
-            st.caption("Ile godzin 'zwykłej' pracy zostaje w tygodniu (48h - dyżury).")
-            
-            analysis_rows = []
-            sorted_weeks = sorted(weekly_shifts.keys())
-            
-            week_labels = {}
-            for wk in sorted_weeks:
-                dates_in_week = [d for d in dates_gen if get_week_key(d) == wk]
-                if dates_in_week:
-                    start_d = min(dates_in_week).strftime("%d.%m")
-                    end_d = max(dates_in_week).strftime("%d.%m")
-                    week_labels[wk] = f"Tydzień {wk.split('_W')[1]} ({start_d}-{end_d})"
-                else:
-                    week_labels[wk] = wk
 
-            for wk in sorted_weeks:
-                row = {"Tydzień": week_labels[wk]}
-                for doc in NO_OPTOUT_DOCTORS:
-                    shifts = weekly_shifts.get(wk, {}).get(doc, 0)
-                    hours_used = shifts * 24
-                    remaining = 48 - hours_used
-                    row[doc] = int(remaining) # Też int
-                analysis_rows.append(row)
+            st.markdown("---")
+            st.markdown(f"### 🏢 Tabela 2: Harmonogram Pracy (Bez {FIXED_DOCTORS[0]})")
+            df_daily = generate_daily_work(dates_gen, sch, all_prefs)
             
-            if analysis_rows:
-                df_analysis = pd.DataFrame(analysis_rows)
-                def style_analysis(val):
-                    if isinstance(val, (int, float)) and val < 0: return 'color: red; font-weight: bold'
-                    return ''
-                st.dataframe(df_analysis.style.applymap(style_analysis, subset=NO_OPTOUT_DOCTORS), use_container_width=True, hide_index=True)
-            else:
-                st.info("Brak danych do analizy.")
+            def style_daily(val):
+                if val == "ZEJŚCIE": return 'background-color: #e0e0e0; color: #555'
+                if "DYŻUR" in str(val): return 'background-color: #d1ecf1; color: #0c5460; font-weight: bold'
+                if "Wolne (48h)" in str(val): return 'background-color: #f8d7da; color: #721c24'
+                if val in ["Wolne", "Urlop", "Kurs"]: return 'color: #D81B60'
+                return ''
 
+            st.dataframe(df_daily.style.applymap(style_daily).format({"Data": lambda t: t.strftime("%Y-%m-%d")}), use_container_width=True, height=600, column_config={"_is_red": None})
+            csv_daily = df_daily.drop(columns=["_is_red"]).to_csv(index=False).encode('utf-8-sig')
+            st.download_button("📥 Pobierz Harmonogram (CSV)", csv_daily, "praca_dzienna.csv", "text/csv")
     else:
-        diff = total_days - total_planned
-        st.warning(f"⚠️ Bilans się nie zgadza! Suma dyżurów ({total_planned}) jest mniejsza od liczby dni ({total_days}). \n\n 👉 **Musisz dodać jeszcze {diff} dyżurów w tabeli powyżej (dla lekarzy rotacyjnych).**")
+        diff = total_days - planned
+        st.warning(f"⚠️ Bilans się nie zgadza! Suma ({planned}) < Dni ({total_days}). Brakuje: {diff}. Dodaj je w tabeli Rotacyjnej.")
