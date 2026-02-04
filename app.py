@@ -9,17 +9,14 @@ from fpdf import FPDF
 
 # --- KONFIGURACJA ZESPOŁU ---
 
-# Grupa PRIORYTETOWA (Fixed) - Ich "Sztywny Dyżur" nadpisuje wszystko inne
 FIXED_DOCTORS = [
     "Jakub Sz.", "Gerard", "Tomasz", "Rafał", "Marcin", "Weronika", "Daniel"
 ]
 
-# Grupa ROTACYJNA - Biorą udział w losowaniu
 ROTATION_DOCTORS = [
     "Jędrzej", "Filip", "Ihab", "Kacper", "Jakub", "Tymoteusz"
 ]
 
-# Lekarze objęci limitem 48h (Bez Opt-Out)
 NO_OPTOUT_DOCTORS = [
     "Jędrzej", "Filip", "Ihab", "Jakub", "Tymoteusz"
 ]
@@ -35,6 +32,8 @@ STATUS_FIXED = "Sztywny Dyżur (Już ustalony)"
 
 REASONS = ["", "Urlop", "Kurs", "Inne"]
 DATA_FILE = "data.csv"
+
+DAY_GROUPS_LIST = ["Poniedziałki", "Wtorki/Środy", "Czwartki", "Piątki", "Soboty", "Niedziele"]
 
 # --- PDF GENERATOR ---
 
@@ -243,6 +242,7 @@ def get_day_group(date_obj):
 
 def _generate_single_schedule(dates, prefs_map, target_limits, last_duty_prev_period):
     schedule = {} 
+    # Inicjalizacja liczników dla wszystkich grup dni
     stats = {doc: {'Total': 0, "Poniedziałki": 0, "Wtorki/Środy": 0, "Czwartki": 0, "Piątki": 0, "Soboty": 0, "Niedziele": 0} for doc in ALL_DOCTORS}
     weekly_counts = {}
     debug_info = {}
@@ -290,9 +290,11 @@ def _generate_single_schedule(dates, prefs_map, target_limits, last_duty_prev_pe
             if weekly_counts.get(wk, {}).get(doc, 0) >= 2: rej[doc] = "Max2"; continue
 
             w = 10 if prefs_map.get(d_str, {}).get(doc, {}).get('Status') == STATUS_AVAILABLE else 1
+            # Sortowanie: chcemy wyrównać grupę dni. Mniej ma w tej grupie -> wyżej na liście.
             candidates.append({'name': doc, 'w': w, 'gc': stats[doc][group], 'tc': stats[doc]['Total']})
 
         if candidates:
+            # Sortowanie: waga > grupa dni > suma ogólna > losowo
             candidates.sort(key=lambda x: (-x['w'], x['gc'], x['tc'], random.random()))
             chosen = candidates[0]['name']
             schedule[d_str] = chosen
@@ -306,7 +308,7 @@ def _generate_single_schedule(dates, prefs_map, target_limits, last_duty_prev_pe
 
     return schedule, stats, debug_info
 
-def generate_optimized(dates, df, limits, last_duty_prev, attempts=50):
+def generate_optimized(dates, df, limits, last_duty_prev, attempts=500): # Zwiększono domyślne próby do 500
     best_res = None
     best_score = -float('inf')
     prefs_map = {}
@@ -317,17 +319,38 @@ def generate_optimized(dates, df, limits, last_duty_prev, attempts=50):
 
     for _ in range(attempts):
         sch, sts, dbg = _generate_single_schedule(dates, prefs_map, limits, last_duty_prev)
-        score = sum(1000 for v in sch.values() if v != "BRAK")
+        
+        # --- SCORING SYSTEM ---
+        score = 0
+        
+        # 1. Kompletność (Absolutny priorytet)
+        filled_days = sum(1 for v in sch.values() if v != "BRAK")
+        score += filled_days * 1_000_000 
+        
+        # 2. Sprawiedliwość (Wariancja w grupach dni)
+        # Im mniejsza różnica między max a min dyżurów w każdej grupie, tym lepiej.
+        total_variance_penalty = 0
+        for g in DAY_GROUPS_LIST: # Sprawdzamy WSZYSTKIE grupy, nie tylko weekendy
+            cnts = [sts[d][g] for d in ROTATION_DOCTORS]
+            if cnts:
+                diff = max(cnts) - min(cnts)
+                total_variance_penalty += diff * 1000 # Bardzo wysoka kara za nierówność
+        
+        score -= total_variance_penalty
+        
+        # 3. Preferencje (Chętni vs Niechętni)
+        pref_score = 0
         for d_str, doc in sch.items():
             if doc in ROTATION_DOCTORS and doc != "BRAK":
                 s = prefs_map.get(d_str, {}).get(doc, {}).get('Status', STATUS_AVAILABLE)
-                score += 10 if s == STATUS_AVAILABLE else 1
-        for g in ["Piątki", "Soboty", "Niedziele"]:
-            cnts = [sts[d][g] for d in ROTATION_DOCTORS]
-            if cnts: score -= (max(cnts) - min(cnts)) * 5
+                if s == STATUS_AVAILABLE: pref_score += 10
+                elif s == STATUS_RELUCTANT: pref_score += 1
+        score += pref_score
+
         if score > best_score:
             best_score = score
             best_res = (sch, sts, dbg, score)
+    
     return best_res
 
 # --- HARMONOGRAM DZIENNY ---
@@ -420,9 +443,10 @@ with st.sidebar:
     sel_period_name = st.selectbox("Okres", periods, index=default_idx)
     sel_year = st.number_input("Rok", 2025, 2030, today.year)
     start_m = {"Styczeń - Luty": 1, "Marzec - Kwiecień": 3, "Maj - Czerwiec": 5, "Lipiec - Sierpień": 7, "Wrzesień - Październik": 9, "Listopad - Grudzień": 11}[sel_period_name]
+    
     p_start, p_day = get_settlement_period_info(sel_year, start_m)
     st.info(f"Start: {p_start} ({p_day}).")
-    attempts_count = st.slider("Próby AI", 10, 500, 100)
+    attempts_count = st.slider("Próby AI (Balansowanie)", 50, 2000, 500)
 
 tab1, tab2 = st.tabs(["📝 Dostępność", "🧮 Grafik"])
 
@@ -507,10 +531,21 @@ with tab2:
     total_days = len(dates_gen)
     
     st.subheader("1. Dyżury Ustalone (Fixed)")
-    fixed_df = pd.DataFrame([{"Lekarz": d, "Liczba Dyżurów": fixed_counts[d]} for d in FIXED_DOCTORS])
-    ed_fixed = st.data_editor(fixed_df, column_config={"Lekarz": st.column_config.TextColumn(disabled=True)}, hide_index=True, use_container_width=True)
+    fixed_table_data = []
+    for doc in FIXED_DOCTORS:
+        fixed_table_data.append({"Lekarz": doc, "Liczba Dyżurów": fixed_counts[doc]})
     
-    sum_fixed_table = ed_fixed["Liczba Dyżurów"].sum()
+    edited_fixed_table = st.data_editor(
+        pd.DataFrame(fixed_table_data),
+        column_config={
+            "Lekarz": st.column_config.TextColumn(disabled=True),
+            "Liczba Dyżurów": st.column_config.NumberColumn(min_value=0, max_value=31, step=1)
+        },
+        hide_index=True, 
+        use_container_width=True
+    )
+    
+    sum_fixed_table = edited_fixed_table["Liczba Dyżurów"].sum()
     pool_for_rotation = total_days - sum_fixed_table
     
     col1, col2, col3 = st.columns(3)
@@ -536,9 +571,9 @@ with tab2:
         if st.button("🚀 GENERUJ GRAFIKI", type="primary"):
             limits = {}
             for _, r in ed_rot.iterrows(): limits[r['Lekarz']] = r['Limit']
-            for _, r in ed_fixed.iterrows(): limits[r['Lekarz']] = r['Liczba Dyżurów']
+            for _, r in edited_fixed_table.iterrows(): limits[r['Lekarz']] = r['Liczba Dyżurów']
             
-            with st.spinner("Symulacja..."):
+            with st.spinner(f"Optymalizacja (analiza {attempts_count} wariantów pod kątem sprawiedliwości)..."):
                 sch, stats, dbg, sc = generate_optimized(dates_gen, all_prefs, limits, real_last_duty, attempts_count)
             
             st.markdown("### 📅 Tabela 1: Grafik Dyżurowy")
@@ -597,5 +632,5 @@ with tab2:
             except Exception as e: st.error(f"Błąd PDF: {e}")
 
     else:
-        diff = total_days - total_planned
-        st.warning(f"⚠️ Bilans się nie zgadza! Suma ({total_planned}) < Dni ({total_days}). Brakuje: {diff}. Dodaj je w tabeli Rotacyjnej.")
+        diff = total_days - planned
+        st.warning(f"⚠️ Bilans się nie zgadza! Suma ({planned}) < Dni ({total_days}). Brakuje: {diff}. Dodaj je w tabeli Rotacyjnej.")
