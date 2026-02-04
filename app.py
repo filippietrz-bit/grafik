@@ -54,15 +54,29 @@ class PDF(FPDF):
         self.cell(0, 10, f'Strona {self.page_no()}', 0, 0, 'C')
 
 def remove_pl_chars(text):
-    """Zamienia polskie znaki na ASCII dla bezpieczeństwa PDF."""
+    """
+    Zamienia polskie znaki i emoji na ASCII dla bezpieczeństwa PDF.
+    Usuwa emoji, które powodują UnicodeEncodeError w bibliotece FPDF.
+    """
+    if not isinstance(text, str): return str(text)
+    
+    # 1. Mapa zamienników (polskie znaki + usuwanie emoji)
     replacements = {
         'ą': 'a', 'ć': 'c', 'ę': 'e', 'ł': 'l', 'ń': 'n', 'ó': 'o', 'ś': 's', 'ź': 'z', 'ż': 'z',
-        'Ą': 'A', 'Ć': 'C', 'Ę': 'E', 'Ł': 'L', 'Ń': 'N', 'Ó': 'O', 'Ś': 'S', 'Ź': 'Z', 'Ż': 'Z'
+        'Ą': 'A', 'Ć': 'C', 'Ę': 'E', 'Ł': 'L', 'Ń': 'N', 'Ó': 'O', 'Ś': 'S', 'Ź': 'Z', 'Ż': 'Z',
+        '🔴': ' ', # Usuwamy kropkę (zastępujemy spacją)
+        '⚠️': '!',
+        '✅': 'OK'
     }
-    if not isinstance(text, str): return str(text)
     for k, v in replacements.items():
         text = text.replace(k, v)
-    return text
+    
+    # 2. Ostateczny bezpiecznik: kodowanie do latin-1 z zamianą nieznanych znaków na '?'
+    # To gwarantuje, że żaden dziwny znak nie przedostanie się do PDF
+    try:
+        return text.encode('latin-1', 'replace').decode('latin-1')
+    except:
+        return "Tekst nieczytelny"
 
 def create_pdf_bytes(dataframe, title):
     pdf = PDF()
@@ -71,13 +85,15 @@ def create_pdf_bytes(dataframe, title):
     
     # Tytuł okresu
     pdf.set_font("Arial", 'B', 12)
-    pdf.cell(0, 10, remove_pl_chars(title), 0, 1, 'L')
+    # Zabezpieczamy tytuł
+    safe_title = remove_pl_chars(title)
+    pdf.cell(0, 10, safe_title, 0, 1, 'L')
     pdf.ln(5)
     
     # Nagłówki tabeli
     pdf.set_font("Arial", 'B', 10)
     pdf.cell(40, 10, 'Data', 1)
-    pdf.cell(50, 10, 'Dzien', 1)
+    pdf.cell(60, 10, 'Dzien', 1) # Zwiększyłem szerokość dla dnia
     pdf.cell(80, 10, 'Lekarz', 1)
     pdf.ln()
     
@@ -85,6 +101,8 @@ def create_pdf_bytes(dataframe, title):
     pdf.set_font("Arial", size=10)
     for _, row in dataframe.iterrows():
         d_str = row['Data'].strftime('%Y-%m-%d')
+        
+        # Zabezpieczamy teksty funkcją czyszczącą
         day_str = remove_pl_chars(row['Info'])
         doc_str = remove_pl_chars(str(row['Dyżurny']))
         
@@ -96,7 +114,7 @@ def create_pdf_bytes(dataframe, title):
             fill = False
             
         pdf.cell(40, 10, d_str, 1, 0, 'L', fill)
-        pdf.cell(50, 10, day_str, 1, 0, 'L', fill)
+        pdf.cell(60, 10, day_str, 1, 0, 'L', fill)
         pdf.cell(80, 10, doc_str, 1, 1, 'L', fill)
         
     return pdf.output(dest='S').encode('latin-1', 'replace')
@@ -374,7 +392,7 @@ with st.sidebar:
     
     p_start, p_day = get_settlement_period_info(sel_year, start_m)
     st.info(f"Początek okresu: {p_start} ({p_day}).")
-    st.caption("v2.1 (PDF + Priority)")
+    st.caption("v2.2 (Unicode Fix)")
     attempts_count = st.slider("Liczba prób (AI)", 10, 200, 50)
 
 tab1, tab2 = st.tabs(["📝 Dostępność", "🧮 Grafik"])
@@ -560,15 +578,17 @@ with tab2:
 
             df_res = pd.DataFrame(res_rows)
             
-            # PDF Generation
-            pdf_bytes = create_pdf_bytes(df_res, f"Grafik {sel_period_name} {sel_year}")
-            
-            st.download_button(
-                label="📥 Pobierz Grafik jako PDF",
-                data=pdf_bytes,
-                file_name=f"grafik_{sel_period_name}_{sel_year}.pdf",
-                mime="application/pdf"
-            )
+            # PDF Generation - Bezpieczne kodowanie
+            try:
+                pdf_bytes = create_pdf_bytes(df_res, f"Grafik {sel_period_name} {sel_year}")
+                st.download_button(
+                    label="📥 Pobierz Grafik jako PDF",
+                    data=pdf_bytes,
+                    file_name=f"grafik_{sel_period_name}_{sel_year}.pdf",
+                    mime="application/pdf"
+                )
+            except Exception as e:
+                st.error(f"Błąd generowania PDF: {e}")
 
             def style_rows(row):
                 if row['Dyżurny'] == "BRAK": return ['background-color: #ffcccc; color: red; font-weight: bold'] * len(row)
