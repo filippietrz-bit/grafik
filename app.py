@@ -7,10 +7,8 @@ from github import Github
 from io import StringIO
 
 # --- KONFIGURACJA ZESPOŁU ---
-# DOCTORS_TEAM - to lekarze, którzy biorą udział w losowaniu reszty dni
 DOCTORS_TEAM = ["Jędrzej", "Filip", "Ihab", "Kacper", "Jakub", "Tymoteusz"]
 JAKUB_SZ = "Jakub Sz."
-# ALL_DOCTORS - wszyscy (potrzebne do wyświetlania w listach wyboru)
 ALL_DOCTORS = [JAKUB_SZ] + DOCTORS_TEAM
 
 # Statusy
@@ -267,7 +265,7 @@ with tab1:
     
     # --- LOGIKA DLA JAKUBA SZ. (Uproszczona Lista) ---
     if current_user == JAKUB_SZ:
-        st.info("👋 Tryb dodawania pojedynczych dyżurów. Lista pokazuje tylko dni oznaczone jako 'Sztywny Dyżur'.")
+        st.info("👋 Tryb dodawania pojedynczych dyżurów. Kliknij '+', aby dodać wiersz i wybierz datę.")
         
         # Filtrujemy istniejące wpisy Jakuba w tym okresie
         existing_data = []
@@ -277,22 +275,25 @@ with tab1:
             subset = df_db[mask]
             
             for _, row in subset.iterrows():
-                # POPRAWKA: Ładujemy tylko to co jest faktycznie Fixed. 
-                # Jeśli w bazie są śmieci ("Dostępny" dla każdego dnia), to je ignorujemy.
+                # Ładujemy tylko to co jest faktycznie Fixed.
                 if row['Status'] == STATUS_FIXED:
                     try:
                         d_obj = datetime.datetime.strptime(row['Data'], '%Y-%m-%d').date()
                         existing_data.append({"Data": d_obj, "Status": STATUS_FIXED})
                     except: pass
         
-        jakub_df = pd.DataFrame(existing_data)
+        # FIX: Jawne zdefiniowanie kolumn, nawet jeśli lista jest pusta
+        if not existing_data:
+            jakub_df = pd.DataFrame(columns=["Data", "Status"])
+        else:
+            jakub_df = pd.DataFrame(existing_data)
         
         # Edytor dynamiczny (dodawanie wierszy)
         edited_jakub = st.data_editor(
             jakub_df,
             column_config={
                 "Data": st.column_config.DateColumn("Data Dyżuru", format="DD.MM.YYYY", required=True),
-                "Status": st.column_config.TextColumn("Status", disabled=True, default=STATUS_FIXED)
+                "Status": st.column_config.SelectboxColumn("Status", options=[STATUS_FIXED], required=True, default=STATUS_FIXED)
             },
             num_rows="dynamic", # Pozwala dodawać wiersze
             use_container_width=True,
@@ -311,6 +312,7 @@ with tab1:
                     
                     d_str = d_val.strftime('%Y-%m-%d')
                     if d_str in period_date_strs:
+                        # Wymuszamy status FIXED, ignorując co jest w tabeli
                         valid_entries.append({"Data": d_str, "Lekarz": current_user, "Status": STATUS_FIXED})
                     else:
                         st.warning(f"Data {d_str} jest spoza wybranego okresu i została pominięta.")
@@ -321,7 +323,7 @@ with tab1:
                 if df_db.empty:
                     final_db = final_new
                 else:
-                    # Usuwamy wszystko co dotyczy Jakuba w tym okresie (również stare śmieci)
+                    # Usuwamy wszystko co dotyczy Jakuba w tym okresie
                     mask_remove = (df_db['Lekarz'] == current_user) & (df_db['Data'].isin(period_date_strs))
                     df_cleaned = df_db[~mask_remove]
                     final_db = pd.concat([df_cleaned, final_new], ignore_index=True)
