@@ -167,13 +167,12 @@ def generate_schedule(dates, preferences_df, target_limits):
             if d_str not in prefs_map: prefs_map[d_str] = {}
             prefs_map[d_str][row['Lekarz']] = row['Status']
 
-    # KROK 1: SZTYWNE DYŻURY (Dla Jakuba Sz. i innych jeśli mają Fixed)
+    # KROK 1: SZTYWNE DYŻURY
     for d in dates:
         d_str = d.strftime('%Y-%m-%d')
         day_prefs = prefs_map.get(d_str, {})
         
         assigned_fixed = None
-        # Najpierw sprawdzamy Jakuba Sz., potem resztę
         if day_prefs.get(JAKUB_SZ) == STATUS_FIXED:
             assigned_fixed = JAKUB_SZ
         else:
@@ -190,7 +189,7 @@ def generate_schedule(dates, preferences_df, target_limits):
             if wk not in weekly_counts: weekly_counts[wk] = {}
             weekly_counts[wk][assigned_fixed] = weekly_counts[wk].get(assigned_fixed, 0) + 1
 
-    # KROK 2: Obsadzanie reszty dni (tylko przez DOCTORS_TEAM)
+    # KROK 2: Obsadzanie reszty dni
     days_to_fill = [d for d in dates if d.strftime('%Y-%m-%d') not in schedule]
     random.shuffle(days_to_fill)
     
@@ -204,20 +203,13 @@ def generate_schedule(dates, preferences_df, target_limits):
         next_day = (d + datetime.timedelta(days=1)).strftime('%Y-%m-%d')
 
         for doc in DOCTORS_TEAM:
-            # 1. Limit globalny
             if stats[doc]['Total'] >= target_limits.get(doc, 0): continue
             
-            # 2. Dostępność
             status = prefs_map.get(d_str, {}).get(doc, STATUS_AVAILABLE)
             if status == STATUS_UNAVAILABLE: continue
             
-            # 3. Odpoczynek po dyżurze (wczoraj)
             if schedule.get(prev_day) == doc: continue
-            
-            # 4. Odpoczynek przed dyżurem (jutro - fixed)
             if schedule.get(next_day) == doc: continue
-            
-            # 5. Limit tygodniowy
             if weekly_counts.get(wk, {}).get(doc, 0) >= 2: continue
 
             weight = 10 if status == STATUS_AVAILABLE else 1
@@ -263,7 +255,6 @@ with tab1:
     dates = get_period_dates(sel_year, start_m)
     df_db = load_data()
     
-    # --- LOGIKA DLA JAKUBA SZ. (Uproszczona Lista) ---
     if current_user == JAKUB_SZ:
         st.info("👋 Tryb dodawania pojedynczych dyżurów. Kliknij '+', aby dodać wiersz i wybierz datę.")
         
@@ -285,7 +276,6 @@ with tab1:
         else:
             jakub_df = pd.DataFrame(existing_data)
         
-        # Edytor dynamiczny
         edited_jakub = st.data_editor(
             jakub_df,
             column_config={
@@ -302,16 +292,13 @@ with tab1:
                 valid_entries = []
                 period_date_strs = [d.strftime('%Y-%m-%d') for d in dates]
                 
-                # --- POPRAWKA BŁĘDU ATRRIBUTE ERROR ---
                 for _, row in edited_jakub.iterrows():
                     d_val = row['Data']
                     if pd.isna(d_val): continue
-                    
                     try:
                         d_val_fixed = pd.to_datetime(d_val)
                         d_str = d_val_fixed.strftime('%Y-%m-%d')
-                    except:
-                        continue 
+                    except: continue 
                     
                     if d_str in period_date_strs:
                         valid_entries.append({"Data": d_str, "Lekarz": current_user, "Status": STATUS_FIXED})
@@ -319,17 +306,13 @@ with tab1:
                         st.warning(f"Data {d_str} jest spoza wybranego okresu i została pominięta.")
                 
                 final_new = pd.DataFrame(valid_entries)
-                
-                if df_db.empty:
-                    final_db = final_new
+                if df_db.empty: final_db = final_new
                 else:
                     mask_remove = (df_db['Lekarz'] == current_user) & (df_db['Data'].isin(period_date_strs))
                     df_cleaned = df_db[~mask_remove]
                     final_db = pd.concat([df_cleaned, final_new], ignore_index=True)
-                
                 if save_data(final_db): st.success("Zapisano listę dyżurów Jakuba!")
 
-    # --- LOGIKA DLA RESZTY ZESPOŁU ---
     else:
         t_data = []
         for d in dates:
@@ -338,13 +321,11 @@ with tab1:
             if not df_db.empty:
                 rec = df_db[(df_db['Data'] == d_str) & (df_db['Lekarz'] == current_user)]
                 if not rec.empty: status = rec.iloc[0]['Status']
-            
             day_desc = get_day_description(d)
             m_name = "Msc 1" if d.month == start_m else "Msc 2"
             t_data.append({"Data": d, "Miesiąc": m_name, "Dzień / Święto": day_desc, "Status": status})
         
         opts = [STATUS_AVAILABLE, STATUS_RELUCTANT, STATUS_FIXED, STATUS_UNAVAILABLE]
-
         edited_df = st.data_editor(pd.DataFrame(t_data), column_config={
             "Data": st.column_config.DateColumn(disabled=True, format="DD.MM.YYYY"),
             "Miesiąc": st.column_config.TextColumn(disabled=True),
@@ -382,12 +363,9 @@ with tab2:
                     fixed_counts_team[row['Lekarz']] += 1
 
     total_days = len(dates_gen)
-    
     c1, c2, c3 = st.columns(3)
     c1.metric("Liczba dni w okresie", total_days)
-    
     jakub_shifts = c2.number_input(f"Dyżury {JAKUB_SZ}", min_value=0, max_value=total_days, value=jakub_fixed_count)
-    
     rem_days = total_days - jakub_shifts
     c3.metric(f"Do podziału na {len(DOCTORS_TEAM)} os.", max(0, rem_days))
     
@@ -410,12 +388,11 @@ with tab2:
         extra = base_extra + 1 if i < remainder_extra else base_extra
         val_fixed = fixed_counts_team[doc]
         total_suggested = val_fixed + extra
-        lim_data.append({"Lekarz": doc, "Ustalone (Fixed)": val_fixed, "Limit Docelowy": total_suggested})
+        lim_data.append({"Lekarz": doc, "Limit Docelowy": total_suggested})
         
     edited_limits = st.data_editor(
         pd.DataFrame(lim_data), 
         column_config={
-            "Ustalone (Fixed)": st.column_config.NumberColumn(min_value=0, max_value=31, step=1),
             "Limit Docelowy": st.column_config.NumberColumn(min_value=0, max_value=31, step=1)
         },
         hide_index=True, 
@@ -443,7 +420,6 @@ with tab2:
             df_res = pd.DataFrame(res_rows)
             
             def highlight_red_days(row):
-                # Stylizacja tylko czcionki na czerwono
                 return ['color: #D81B60; font-weight: bold'] * len(row) if row['_is_red'] else [''] * len(row)
             
             st.dataframe(
@@ -456,10 +432,8 @@ with tab2:
             st.write("---")
             s_rows = []
             for d in ALL_DOCTORS:
-                if d == JAKUB_SZ:
-                    goal = jakub_shifts 
-                else:
-                    goal = targets.get(d, 0)
+                if d == JAKUB_SZ: goal = jakub_shifts 
+                else: goal = targets.get(d, 0)
                 
                 s_rows.append({
                     "Lekarz": d, 
