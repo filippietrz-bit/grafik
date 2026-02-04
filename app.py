@@ -267,7 +267,6 @@ with tab1:
     if current_user == JAKUB_SZ:
         st.info("👋 Tryb dodawania pojedynczych dyżurów. Kliknij '+', aby dodać wiersz i wybierz datę.")
         
-        # Filtrujemy istniejące wpisy Jakuba w tym okresie
         existing_data = []
         if not df_db.empty:
             d_strs = [d.strftime('%Y-%m-%d') for d in dates]
@@ -275,62 +274,63 @@ with tab1:
             subset = df_db[mask]
             
             for _, row in subset.iterrows():
-                # Ładujemy tylko to co jest faktycznie Fixed.
                 if row['Status'] == STATUS_FIXED:
                     try:
                         d_obj = datetime.datetime.strptime(row['Data'], '%Y-%m-%d').date()
                         existing_data.append({"Data": d_obj, "Status": STATUS_FIXED})
                     except: pass
         
-        # FIX: Jawne zdefiniowanie kolumn, nawet jeśli lista jest pusta
         if not existing_data:
             jakub_df = pd.DataFrame(columns=["Data", "Status"])
         else:
             jakub_df = pd.DataFrame(existing_data)
         
-        # Edytor dynamiczny (dodawanie wierszy)
+        # Edytor dynamiczny
         edited_jakub = st.data_editor(
             jakub_df,
             column_config={
                 "Data": st.column_config.DateColumn("Data Dyżuru", format="DD.MM.YYYY", required=True),
                 "Status": st.column_config.SelectboxColumn("Status", options=[STATUS_FIXED], required=True, default=STATUS_FIXED)
             },
-            num_rows="dynamic", # Pozwala dodawać wiersze
+            num_rows="dynamic",
             use_container_width=True,
             hide_index=True
         )
         
         if st.button("💾 Zapisz Dyżury Jakuba (GitHub)", type="primary"):
             with st.spinner("Zapisywanie..."):
-                # Walidacja: czy daty są w wybranym okresie?
                 valid_entries = []
                 period_date_strs = [d.strftime('%Y-%m-%d') for d in dates]
                 
+                # --- POPRAWKA BŁĘDU ATRRIBUTE ERROR ---
                 for _, row in edited_jakub.iterrows():
                     d_val = row['Data']
                     if pd.isna(d_val): continue
                     
-                    d_str = d_val.strftime('%Y-%m-%d')
+                    # Konwertujemy na datetime, bo edytor czasami zwraca stringa, a czasami datę
+                    try:
+                        d_val_fixed = pd.to_datetime(d_val)
+                        d_str = d_val_fixed.strftime('%Y-%m-%d')
+                    except:
+                        continue # Jeśli to totalny śmieć, pomijamy
+                    
                     if d_str in period_date_strs:
-                        # Wymuszamy status FIXED, ignorując co jest w tabeli
                         valid_entries.append({"Data": d_str, "Lekarz": current_user, "Status": STATUS_FIXED})
                     else:
                         st.warning(f"Data {d_str} jest spoza wybranego okresu i została pominięta.")
                 
                 final_new = pd.DataFrame(valid_entries)
                 
-                # Usuwamy STARE wpisy Jakuba z tego okresu i wstawiamy NOWE (z listy)
                 if df_db.empty:
                     final_db = final_new
                 else:
-                    # Usuwamy wszystko co dotyczy Jakuba w tym okresie
                     mask_remove = (df_db['Lekarz'] == current_user) & (df_db['Data'].isin(period_date_strs))
                     df_cleaned = df_db[~mask_remove]
                     final_db = pd.concat([df_cleaned, final_new], ignore_index=True)
                 
                 if save_data(final_db): st.success("Zapisano listę dyżurów Jakuba!")
 
-    # --- LOGIKA DLA RESZTY ZESPOŁU (Pełny Kalendarz) ---
+    # --- LOGIKA DLA RESZTY ZESPOŁU ---
     else:
         t_data = []
         for d in dates:
@@ -369,10 +369,7 @@ with tab2:
     all_prefs = load_data()
     dates_gen = get_period_dates(sel_year, start_m)
     
-    # Zliczamy sztywne dyżury ZESPOŁU
     fixed_counts_team = {doc: 0 for doc in DOCTORS_TEAM}
-    
-    # Zliczamy dyżury Jakuba Sz. (Fixed)
     jakub_fixed_count = 0
     
     if not all_prefs.empty:
