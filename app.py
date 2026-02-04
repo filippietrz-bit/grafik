@@ -77,10 +77,28 @@ def save_data(df):
 # --- LOGIKA KALENDARZA ---
 
 def get_settlement_period_info(year, month):
+    # Okresy zaczynają się w miesiącach nieparzystych: 1, 3, 5, 7, 9, 11
+    # Jeśli podano parzysty, cofamy do nieparzystego startu
     start_month = month if month % 2 != 0 else month - 1
     start_date = datetime.date(year, start_month, 1)
     day_names_pl = ['Poniedziałek', 'Wtorek', 'Środa', 'Czwartek', 'Piątek', 'Sobota', 'Niedziela']
     return start_date, day_names_pl[start_date.weekday()]
+
+def get_period_dates(year, start_month):
+    """Generuje listę dat dla całego 2-miesięcznego okresu."""
+    dates = []
+    
+    # Miesiąc 1
+    num_days_1 = calendar.monthrange(year, start_month)[1]
+    dates.extend([datetime.date(year, start_month, d) for d in range(1, num_days_1 + 1)])
+    
+    # Miesiąc 2 (obsługa przejścia roku teoretycznie niepotrzebna przy blokach 1-2, ..., 11-12)
+    next_month = start_month + 1
+    if next_month <= 12:
+        num_days_2 = calendar.monthrange(year, next_month)[1]
+        dates.extend([datetime.date(year, next_month, d) for d in range(1, num_days_2 + 1)])
+        
+    return dates
 
 def get_week_key(date_obj):
     period_start_date, _ = get_settlement_period_info(date_obj.year, date_obj.month)
@@ -113,7 +131,6 @@ def generate_schedule(dates, preferences_df, target_limits):
             prefs_map[d_str][row['Lekarz']] = row['Status']
 
     # KROK 1: Jakub Sz. (Sztywne dyżury)
-    # Najpierw obsadzamy te, które zaznaczył w tabeli dostępności
     for d in dates:
         d_str = d.strftime('%Y-%m-%d')
         if prefs_map.get(d_str, {}).get(JAKUB_SZ) == STATUS_FIXED:
@@ -124,15 +141,9 @@ def generate_schedule(dates, preferences_df, target_limits):
             if wk not in weekly_counts: weekly_counts[wk] = {}
             weekly_counts[wk][JAKUB_SZ] = weekly_counts[wk].get(JAKUB_SZ, 0) + 1
 
-    # KROK 2: Reszta zespołu (Algorytm z limitami)
-    # Tworzymy listę dni do obsadzenia (pomijając te zajęte przez Jakuba)
+    # KROK 2: Reszta zespołu
     days_to_fill = [d for d in dates if d.strftime('%Y-%m-%d') not in schedule]
-    
-    # Mieszamy dni losowo, żeby nie faworyzować początku miesiąca
     random.shuffle(days_to_fill)
-
-    # Sortujemy dni, żeby najpierw obsadzić te "trudne" (np. gdzie mało kto może), ale tu uproszczona wersja:
-    # Po prostu iterujemy.
     
     for d in days_to_fill:
         d_str = d.strftime('%Y-%m-%d')
@@ -142,7 +153,7 @@ def generate_schedule(dates, preferences_df, target_limits):
         candidates = []
 
         for doc in DOCTORS_TEAM:
-            # 1. Sprawdź czy lekarz nie przekroczył swojego LIMITU MIESIĘCZNEGO
+            # 1. Limit globalny (na 2 miesiące)
             if stats[doc]['Total'] >= target_limits.get(doc, 0):
                 continue
 
@@ -157,7 +168,6 @@ def generate_schedule(dates, preferences_df, target_limits):
             # 4. Limit tygodniowy (2 max)
             if weekly_counts.get(wk, {}).get(doc, 0) >= 2: continue
 
-            # Wagi
             weight = 10 if status == STATUS_AVAILABLE else 1
             
             candidates.append({
@@ -170,7 +180,7 @@ def generate_schedule(dates, preferences_df, target_limits):
         if candidates:
             # Sortowanie: 
             # 1. Preferencja (chętni)
-            # 2. Wyrównanie grup (kto ma najmniej piątków)
+            # 2. Wyrównanie grup (kto ma najmniej w tej grupie dni)
             # 3. Wyrównanie ogólne
             # 4. Losowość
             candidates.sort(key=lambda x: (-x['weight'], x['group_count'], x['total_count'], random.random()))
@@ -191,28 +201,52 @@ st.set_page_config(page_title="Grafik Urologia", layout="wide")
 st.title("🏥 Grafik Dyżurowy - Urologia")
 
 with st.sidebar:
-    st.header("Ustawienia")
-    pl_months = ["Styczeń", "Luty", "Marzec", "Kwiecień", "Maj", "Czerwiec", "Lipiec", "Sierpień", "Wrzesień", "Październik", "Listopad", "Grudzień"]
+    st.header("Konfiguracja")
+    st.image("https://img.icons8.com/fluency/96/calendar.png", width=64)
+    
+    # Wybór okresu 2-miesięcznego
+    periods = [
+        "Styczeń - Luty", 
+        "Marzec - Kwiecień", 
+        "Maj - Czerwiec", 
+        "Lipiec - Sierpień", 
+        "Wrzesień - Październik", 
+        "Listopad - Grudzień"
+    ]
+    
     today = datetime.date.today()
+    # Próba zgadnięcia obecnego okresu
+    curr_month = today.month
+    # Mapowanie miesiąca na indeks okresu (0-5)
+    # 1,2 -> 0; 3,4 -> 1; 5,6 -> 2 etc.
+    default_idx = (curr_month - 1) // 2
     
-    # Domyślny miesiąc: następny
-    def_m = (today.month % 12)
-    def_y = today.year if today.month < 12 else today.year + 1
+    sel_period_name = st.selectbox("Okres Rozliczeniowy", periods, index=default_idx)
+    sel_year = st.number_input("Rok", 2025, 2030, today.year)
     
-    sel_month_name = st.selectbox("Miesiąc", pl_months, index=def_m)
-    sel_month = pl_months.index(sel_month_name) + 1
-    sel_year = st.number_input("Rok", 2025, 2030, def_y)
+    # Mapowanie nazwy na numer miesiąca startowego
+    period_start_months = {
+        "Styczeń - Luty": 1, 
+        "Marzec - Kwiecień": 3, 
+        "Maj - Czerwiec": 5, 
+        "Lipiec - Sierpień": 7, 
+        "Wrzesień - Październik": 9, 
+        "Listopad - Grudzień": 11
+    }
+    start_m = period_start_months[sel_period_name]
     
-    p_start, p_day = get_settlement_period_info(sel_year, sel_month)
-    st.info(f"Okres rozliczeniowy: {p_start} ({p_day}).")
+    p_start, p_day = get_settlement_period_info(sel_year, start_m)
+    st.info(f"Początek okresu: {p_start} ({p_day}).\nGrafik generowany jest łącznie dla 2 miesięcy.")
 
 tab1, tab2 = st.tabs(["📝 Zgłaszanie Dostępności", "🧮 Kalkulator i Grafik"])
 
 # --- TAB 1: DOSTĘPNOŚĆ ---
 with tab1:
-    st.subheader("Wybierz lekarza i zaznacz dostępność")
+    st.subheader(f"Dostępność: {sel_period_name} {sel_year}")
     current_user = st.selectbox("Lekarz:", ALL_DOCTORS, index=2)
-    dates = [datetime.date(sel_year, sel_month, day) for day in range(1, calendar.monthrange(sel_year, sel_month)[1] + 1)]
+    
+    # Generuj daty dla 2 miesięcy
+    dates = get_period_dates(sel_year, start_m)
     
     df_db = load_data()
     
@@ -226,18 +260,22 @@ with tab1:
             if not rec.empty: status = rec.iloc[0]['Status']
         
         day_pl = ["Pon", "Wt", "Śr", "Czw", "Pt", "Sob", "Niedz"][d.weekday()]
-        t_data.append({"Data": d, "Dzień": day_pl, "Status": status})
+        # Dodajemy kolumnę z miesiącem dla czytelności
+        m_name = "Miesiąc 1" if d.month == start_m else "Miesiąc 2"
+        
+        t_data.append({"Data": d, "Miesiąc": m_name, "Dzień": day_pl, "Status": status})
     
     opts = [STATUS_AVAILABLE, STATUS_RELUCTANT, STATUS_UNAVAILABLE]
     if current_user == JAKUB_SZ: 
         opts = [STATUS_FIXED, STATUS_UNAVAILABLE]
-        st.info("Jakubie, zaznacz w tabeli dni, w które bierzesz dyżur na sztywno.")
+        st.info("Jakubie, zaznacz 'Sztywny Dyżur' w dniach, które bierzesz na stałe.")
 
     edited_df = st.data_editor(pd.DataFrame(t_data), column_config={
         "Data": st.column_config.DateColumn(disabled=True, format="DD.MM.YYYY"),
+        "Miesiąc": st.column_config.TextColumn(disabled=True),
         "Dzień": st.column_config.TextColumn(disabled=True),
         "Status": st.column_config.SelectboxColumn("Decyzja", options=opts, required=True, width="medium")
-    }, hide_index=True, height=400, use_container_width=True)
+    }, hide_index=True, height=600, use_container_width=True)
     
     if st.button("💾 Zapisz Dostępność (GitHub)", type="primary"):
         with st.spinner("Zapisywanie..."):
@@ -254,13 +292,12 @@ with tab1:
 
 # --- TAB 2: KALKULATOR I GENERATOR ---
 with tab2:
-    st.header("1. Kalkulator Dyżurów")
+    st.header("1. Kalkulator Dyżurów (na 2 miesiące)")
     
-    # 1. Pobierz dane, żeby sprawdzić ile Jakub Sz. już zaznaczył
     all_prefs = load_data()
-    dates_gen = [datetime.date(sel_year, sel_month, day) for day in range(1, calendar.monthrange(sel_year, sel_month)[1] + 1)]
+    dates_gen = get_period_dates(sel_year, start_m)
     
-    # Policz ile dni Jakub Sz. zaznaczył jako FIXED
+    # Policz ile dni Jakub Sz. zaznaczył jako FIXED w CAŁYM okresie
     jakub_fixed_count = 0
     if not all_prefs.empty:
         for d in dates_gen:
@@ -272,24 +309,26 @@ with tab2:
     total_days = len(dates_gen)
     
     col1, col2, col3 = st.columns(3)
-    col1.metric("Dni w miesiącu", total_days)
+    col1.metric("Dni w okresie", total_days)
     
-    # Input dla Jakuba (domyślnie tyle ile zaznaczył, ale można zmienić)
-    jakub_shifts = col2.number_input(f"Dyżury {JAKUB_SZ}", min_value=0, max_value=total_days, value=jakub_fixed_count)
+    # Input dla Jakuba
+    jakub_shifts = col2.number_input(f"Dyżury {JAKUB_SZ} (łącznie)", min_value=0, max_value=total_days, value=jakub_fixed_count)
     
     remaining_days = total_days - jakub_shifts
     col3.metric("Do podziału na resztę", remaining_days)
     
     # 2. Podział na resztę zespołu
     team_size = len(DOCTORS_TEAM)
-    base_shifts = remaining_days // team_size
-    remainder = remaining_days % team_size
+    if team_size > 0:
+        base_shifts = remaining_days // team_size
+        remainder = remaining_days % team_size
+    else:
+        base_shifts = 0
+        remainder = 0
     
     st.subheader("2. Ustal Limity dla Lekarzy")
-    st.write(f"Wychodzi średnio **{base_shifts}** dyżurów na osobę. Nadwyżka: **{remainder}**.")
+    st.write(f"Na każdego z {team_size} lekarzy przypada średnio **{base_shifts}** dyżurów (w ciągu 2 mies). Reszta: **{remainder}**.")
     
-    # Przygotowanie tabeli do edycji limitów
-    # Domyślny podział: wszyscy dostają base, a pierwsi na liście +1 z reszty
     limits_data = []
     for i, doc in enumerate(DOCTORS_TEAM):
         val = base_shifts + 1 if i < remainder else base_shifts
@@ -299,7 +338,7 @@ with tab2:
     
     edited_limits = st.data_editor(
         limits_df, 
-        column_config={"Limit Dyżurów": st.column_config.NumberColumn(min_value=0, max_value=15, step=1)},
+        column_config={"Limit Dyżurów": st.column_config.NumberColumn(min_value=0, max_value=30, step=1)},
         hide_index=True,
         use_container_width=True
     )
@@ -307,24 +346,30 @@ with tab2:
     # Walidacja sumy
     current_sum = edited_limits["Limit Dyżurów"].sum()
     if current_sum != remaining_days:
-        st.warning(f"⚠️ Suma przydzielonych dyżurów ({current_sum}) nie zgadza się z liczbą dni do obsadzenia ({remaining_days})! Popraw tabelę wyżej.")
+        st.warning(f"⚠️ Suma przydzielonych dyżurów ({current_sum}) nie zgadza się z liczbą dni do obsadzenia ({remaining_days})!")
     else:
         st.success(f"✅ Suma się zgadza ({current_sum}). Można generować.")
     
-        if st.button("🚀 GENERUJ GRAFIK WG LIMITÓW", type="primary"):
-            # Konwersja tabeli limitów na słownik
+        if st.button("🚀 GENERUJ GRAFIK (2 MIESIĄCE)", type="primary"):
             targets = {row['Lekarz']: row['Limit Dyżurów'] for _, row in edited_limits.iterrows()}
             
-            with st.spinner("Układanie puzzli..."):
+            with st.spinner("Układanie grafiku na cały okres..."):
                 schedule_map, stats = generate_schedule(dates_gen, all_prefs, targets)
             
-            # Wyniki
-            res_data = [{"Data": d, "Dzień": ["Pon", "Wt", "Śr", "Czw", "Pt", "Sob", "Niedz"][d.weekday()], "Dyżurny": schedule_map.get(d.strftime('%Y-%m-%d'), "-")} for d in dates_gen]
+            # Wyniki - Tabela
+            res_data = []
+            for d in dates_gen:
+                res_data.append({
+                    "Data": d,
+                    "Dzień": ["Pon", "Wt", "Śr", "Czw", "Pt", "Sob", "Niedz"][d.weekday()],
+                    "Miesiąc": "Msc 1" if d.month == start_m else "Msc 2",
+                    "Dyżurny": schedule_map.get(d.strftime('%Y-%m-%d'), "-")
+                })
             
-            st.dataframe(pd.DataFrame(res_data), use_container_width=True, hide_index=True)
+            st.dataframe(pd.DataFrame(res_data), use_container_width=True, hide_index=True, height=600)
             
-            st.write("---")
-            st.subheader("Statystyki Wykonania")
+            st.divider()
+            st.subheader("Statystyki Wykonania Planu")
             s_rows = []
             for doc in ALL_DOCTORS:
                 target = jakub_shifts if doc == JAKUB_SZ else targets.get(doc, 0)
@@ -342,7 +387,6 @@ with tab2:
                 
             st.dataframe(pd.DataFrame(s_rows), hide_index=True)
             
-            # Ostrzeżenie o brakach
             missing = [d['Data'] for d in res_data if "BRAK" in str(d['Dyżurny'])]
             if missing:
-                st.error(f"Nie udało się obsadzić dni: {', '.join([str(m) for m in missing])}. Powód: Konflikt reguł (np. wszyscy niedostępni lub limity tygodniowe). Spróbuj poluzować 'Niechętnych' w tabeli dostępności.")
+                st.error(f"Nie udało się obsadzić dni: {len(missing)} dni. Sprawdź dostępność i limity.")
