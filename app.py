@@ -30,6 +30,17 @@ ROTATION_DOCTORS = [
     "Tymoteusz"
 ]
 
+# Lekarze objęci limitem 48h (Bez Opt-Out)
+# "Kuba" z zapytania to "Jakub" w systemie
+NO_OPTOUT_DOCTORS = [
+    "Jędrzej",
+    "Filip",
+    "Ihab",
+    "Kacper",
+    "Jakub",
+    "Tymoteusz"
+]
+
 ALL_DOCTORS = FIXED_DOCTORS + ROTATION_DOCTORS
 
 # Statusy
@@ -260,7 +271,6 @@ def _generate_single_schedule(dates, prefs_map, target_limits):
     # 2. ROTACJA
     days_to_fill = [d for d in dates if d.strftime('%Y-%m-%d') not in schedule]
     
-    # Heurystyka: najpierw dni trudne (mało dostępnych)
     def count_availability(day_obj):
         d_s = day_obj.strftime('%Y-%m-%d')
         return sum(1 for doc in ROTATION_DOCTORS if prefs_map.get(d_s, {}).get(doc) != STATUS_UNAVAILABLE)
@@ -468,7 +478,6 @@ with tab2:
     
     st.subheader("Dyżury Ustalone (Fixed)")
     fixed_table_data = []
-    # POPRAWKA: Tylko jedna kolumna "Liczba Dyżurów" dla lekarzy Fixed
     for doc in FIXED_DOCTORS:
         fixed_table_data.append({"Lekarz": doc, "Liczba Dyżurów": fixed_counts_map[doc]})
     
@@ -482,7 +491,6 @@ with tab2:
         use_container_width=True
     )
     
-    # Aktualizacja sumy
     sum_fixed_table = edited_fixed_table["Liczba Dyżurów"].sum()
     sum_fixed_rotational = sum(fixed_counts_map[d] for d in ROTATION_DOCTORS)
     total_consumed = sum_fixed_table + sum_fixed_rotational
@@ -494,15 +502,15 @@ with tab2:
     col3.metric("Do podziału", max(0, rem_days))
     
     st.subheader("Limity Rotacyjne")
-    st.caption("Domyślnie dzielę dni równo. Jeśli zostaną resztki, musisz dodać je ręcznie wybranym lekarzom, aż bilans się zgodzi.")
+    st.caption("Domyślnie dzielę pulę dni równo. Jeśli zostaną resztki, musisz dodać je ręcznie wybranym lekarzom, aż bilans się zgodzi.")
     
     team_size = len(ROTATION_DOCTORS)
-    # POPRAWKA: Równy podział w dół, bez zgadywania kto dostaje +1
+    # Równy podział w dół (bez faworyzowania nikogo na start)
     base = max(0, rem_days) // team_size if team_size else 0
     
     lim_data = []
     for i, doc in enumerate(ROTATION_DOCTORS):
-        sugg = base 
+        sugg = base
         existing = fixed_counts_map[doc]
         lim_data.append({"Lekarz": doc, "Limit": sugg + existing})
         
@@ -516,7 +524,6 @@ with tab2:
         if st.button("🚀 GENERUJ", type="primary"):
             targets = {}
             for _, r in edited_limits.iterrows(): targets[r['Lekarz']] = r['Limit']
-            # POPRAWKA: Pobieramy cel z nowej kolumny "Liczba Dyżurów"
             for _, r in edited_fixed_table.iterrows(): targets[r['Lekarz']] = r['Liczba Dyżurów']
             
             with st.spinner(f"Symulacja {attempts_count} wariantów..."):
@@ -524,6 +531,10 @@ with tab2:
             
             res_rows = []
             fails = []
+            
+            # Grupowanie dyżurów do analizy 48h
+            weekly_shifts = {} # {week_key: {doc: count}}
+            
             for d in dates_gen:
                 is_free = is_red_day(d)
                 d_s = d.strftime('%Y-%m-%d')
@@ -532,6 +543,13 @@ with tab2:
                     "Data": d, "Info": get_day_description(d), 
                     "Dyżurny": assigned, "_is_red": is_free
                 })
+                
+                # Zliczanie do analizy
+                if assigned in NO_OPTOUT_DOCTORS:
+                    wk = get_week_key(d)
+                    if wk not in weekly_shifts: weekly_shifts[wk] = {}
+                    weekly_shifts[wk][assigned] = weekly_shifts[wk].get(assigned, 0) + 1
+
                 if assigned == "BRAK":
                     if d_s in dbg and dbg[d_s]:
                         reason_str = ", ".join([f"**{k}**: {v}" for k,v in dbg[d_s].items()])
@@ -560,6 +578,7 @@ with tab2:
             st.dataframe(df_res.style.apply(style_rows, axis=1).format({"Data": lambda t: t.strftime("%Y-%m-%d")}), use_container_width=True, height=600, column_config={"_is_red": None})
             
             st.write("---")
+            st.subheader("Statystyki")
             s_rows = []
             for d in ALL_DOCTORS:
                 goal = targets.get(d, 0)
@@ -574,6 +593,49 @@ with tab2:
 
             st.dataframe(pd.DataFrame(s_rows).fillna(""), hide_index=True)
             
+            st.write("---")
+            st.subheader("Analiza Kodeksowa (Limit 48h)")
+            st.caption("Poniższa tabela pokazuje, ile godzin 'zwykłej' pracy lekarz może jeszcze wykonać w danym tygodniu, aby suma (praca + dyżury) nie przekroczyła 48h. Ujemna wartość oznacza przekroczenie normy dyżurami (niedopuszczalne bez opt-out).")
+            
+            # Budowa tabeli analizy
+            analysis_rows = []
+            # Sortujemy tygodnie chronologicznie
+            sorted_weeks = sorted(weekly_shifts.keys())
+            
+            # Mapowanie klucza tygodnia na czytelny opis
+            week_labels = {}
+            for wk in sorted_weeks:
+                # Znajdź zakres dat dla tego tygodnia z dates_gen
+                dates_in_week = [d for d in dates_gen if get_week_key(d) == wk]
+                if dates_in_week:
+                    start_d = min(dates_in_week).strftime("%d.%m")
+                    end_d = max(dates_in_week).strftime("%d.%m")
+                    week_labels[wk] = f"Tydzień {wk.split('_W')[1]} ({start_d}-{end_d})"
+                else:
+                    week_labels[wk] = wk
+
+            for wk in sorted_weeks:
+                row = {"Tydzień": week_labels[wk]}
+                for doc in NO_OPTOUT_DOCTORS:
+                    shifts = weekly_shifts.get(wk, {}).get(doc, 0)
+                    hours_used = shifts * 24
+                    remaining = 48 - hours_used
+                    row[doc] = remaining
+                analysis_rows.append(row)
+            
+            if analysis_rows:
+                df_analysis = pd.DataFrame(analysis_rows)
+                
+                # Stylizacja tabeli analizy (czerwone tło dla ujemnych wartości)
+                def style_analysis(val):
+                    if isinstance(val, (int, float)) and val < 0:
+                        return 'color: red; font-weight: bold'
+                    return ''
+                
+                st.dataframe(df_analysis.style.applymap(style_analysis, subset=NO_OPTOUT_DOCTORS), use_container_width=True, hide_index=True)
+            else:
+                st.info("Brak danych do analizy (brak dyżurów w wybranym okresie dla lekarzy bez opt-out).")
+
     else:
         diff = total_days - total_planned
         st.warning(f"⚠️ Bilans się nie zgadza! Suma dyżurów ({total_planned}) jest mniejsza od liczby dni ({total_days}). \n\n 👉 **Musisz dodać jeszcze {diff} dyżurów w tabeli powyżej.**")
