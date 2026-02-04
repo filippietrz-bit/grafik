@@ -307,12 +307,11 @@ with tab1:
                     d_val = row['Data']
                     if pd.isna(d_val): continue
                     
-                    # Konwertujemy na datetime, bo edytor czasami zwraca stringa, a czasami datę
                     try:
                         d_val_fixed = pd.to_datetime(d_val)
                         d_str = d_val_fixed.strftime('%Y-%m-%d')
                     except:
-                        continue # Jeśli to totalny śmieć, pomijamy
+                        continue 
                     
                     if d_str in period_date_strs:
                         valid_entries.append({"Data": d_str, "Lekarz": current_user, "Status": STATUS_FIXED})
@@ -444,7 +443,8 @@ with tab2:
             df_res = pd.DataFrame(res_rows)
             
             def highlight_red_days(row):
-                return ['background-color: #ffe6e6'] * len(row) if row['_is_red'] else [''] * len(row)
+                # Stylizacja tylko czcionki na czerwono
+                return ['color: #D81B60; font-weight: bold'] * len(row) if row['_is_red'] else [''] * len(row)
             
             st.dataframe(
                 df_res.style.apply(highlight_red_days, axis=1).format({"Data": lambda t: t.strftime("%Y-%m-%d")}),
