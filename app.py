@@ -494,13 +494,15 @@ with tab2:
     col3.metric("Do podziału", max(0, rem_days))
     
     st.subheader("Limity Rotacyjne")
+    st.caption("Domyślnie dzielę dni równo. Jeśli zostaną resztki, musisz dodać je ręcznie wybranym lekarzom, aż bilans się zgodzi.")
+    
     team_size = len(ROTATION_DOCTORS)
+    # POPRAWKA: Równy podział w dół, bez zgadywania kto dostaje +1
     base = max(0, rem_days) // team_size if team_size else 0
-    rem = max(0, rem_days) % team_size if team_size else 0
     
     lim_data = []
     for i, doc in enumerate(ROTATION_DOCTORS):
-        sugg = base + 1 if i < rem else base
+        sugg = base 
         existing = fixed_counts_map[doc]
         lim_data.append({"Lekarz": doc, "Limit": sugg + existing})
         
@@ -573,4 +575,5 @@ with tab2:
             st.dataframe(pd.DataFrame(s_rows).fillna(""), hide_index=True)
             
     else:
-        st.warning(f"Suma dyżurów ({total_planned}) != Liczba dni ({total_days}). Różnica: {total_planned - total_days}")
+        diff = total_days - total_planned
+        st.warning(f"⚠️ Bilans się nie zgadza! Suma dyżurów ({total_planned}) jest mniejsza od liczby dni ({total_days}). \n\n 👉 **Musisz dodać jeszcze {diff} dyżurów w tabeli powyżej.**")
