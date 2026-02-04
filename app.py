@@ -267,21 +267,23 @@ with tab1:
     
     # --- LOGIKA DLA JAKUBA SZ. (Uproszczona Lista) ---
     if current_user == JAKUB_SZ:
-        st.info("👋 Tryb dodawania pojedynczych dyżurów. Dodaj wiersze tylko dla dni, w których dyżurujesz.")
+        st.info("👋 Tryb dodawania pojedynczych dyżurów. Lista pokazuje tylko dni oznaczone jako 'Sztywny Dyżur'.")
         
         # Filtrujemy istniejące wpisy Jakuba w tym okresie
         existing_data = []
         if not df_db.empty:
             d_strs = [d.strftime('%Y-%m-%d') for d in dates]
-            # Bierzemy tylko wpisy Jakuba, które są w zakresie dat tego okresu
             mask = (df_db['Lekarz'] == current_user) & (df_db['Data'].isin(d_strs))
             subset = df_db[mask]
             
             for _, row in subset.iterrows():
-                try:
-                    d_obj = datetime.datetime.strptime(row['Data'], '%Y-%m-%d').date()
-                    existing_data.append({"Data": d_obj, "Status": STATUS_FIXED})
-                except: pass
+                # POPRAWKA: Ładujemy tylko to co jest faktycznie Fixed. 
+                # Jeśli w bazie są śmieci ("Dostępny" dla każdego dnia), to je ignorujemy.
+                if row['Status'] == STATUS_FIXED:
+                    try:
+                        d_obj = datetime.datetime.strptime(row['Data'], '%Y-%m-%d').date()
+                        existing_data.append({"Data": d_obj, "Status": STATUS_FIXED})
+                    except: pass
         
         jakub_df = pd.DataFrame(existing_data)
         
@@ -319,7 +321,7 @@ with tab1:
                 if df_db.empty:
                     final_db = final_new
                 else:
-                    # Usuwamy wszystko co dotyczy Jakuba w tym okresie
+                    # Usuwamy wszystko co dotyczy Jakuba w tym okresie (również stare śmieci)
                     mask_remove = (df_db['Lekarz'] == current_user) & (df_db['Data'].isin(period_date_strs))
                     df_cleaned = df_db[~mask_remove]
                     final_db = pd.concat([df_cleaned, final_new], ignore_index=True)
