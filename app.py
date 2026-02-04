@@ -308,7 +308,7 @@ def _generate_single_schedule(dates, prefs_map, target_limits, last_duty_prev_pe
 
     return schedule, stats, debug_info
 
-def generate_optimized(dates, df, limits, last_duty_prev, attempts=500): # Zwiększono domyślne próby do 500
+def generate_optimized(dates, df, limits, last_duty_prev, attempts=500):
     best_res = None
     best_score = -float('inf')
     prefs_map = {}
@@ -322,23 +322,20 @@ def generate_optimized(dates, df, limits, last_duty_prev, attempts=500): # Zwię
         
         # --- SCORING SYSTEM ---
         score = 0
-        
-        # 1. Kompletność (Absolutny priorytet)
         filled_days = sum(1 for v in sch.values() if v != "BRAK")
         score += filled_days * 1_000_000 
         
-        # 2. Sprawiedliwość (Wariancja w grupach dni)
-        # Im mniejsza różnica między max a min dyżurów w każdej grupie, tym lepiej.
+        # Sprawiedliwość (Wariancja w grupach dni)
         total_variance_penalty = 0
-        for g in DAY_GROUPS_LIST: # Sprawdzamy WSZYSTKIE grupy, nie tylko weekendy
+        for g in DAY_GROUPS_LIST:
             cnts = [sts[d][g] for d in ROTATION_DOCTORS]
             if cnts:
                 diff = max(cnts) - min(cnts)
-                total_variance_penalty += diff * 1000 # Bardzo wysoka kara za nierówność
+                total_variance_penalty += diff * 1000 
         
         score -= total_variance_penalty
         
-        # 3. Preferencje (Chętni vs Niechętni)
+        # Preferencje
         pref_score = 0
         for d_str, doc in sch.items():
             if doc in ROTATION_DOCTORS and doc != "BRAK":
@@ -446,7 +443,7 @@ with st.sidebar:
     
     p_start, p_day = get_settlement_period_info(sel_year, start_m)
     st.info(f"Start: {p_start} ({p_day}).")
-    attempts_count = st.slider("Próby AI (Balansowanie)", 50, 2000, 500)
+    attempts_count = st.slider("Próby AI", 10, 500, 100)
 
 tab1, tab2 = st.tabs(["📝 Dostępność", "🧮 Grafik"])
 
@@ -532,6 +529,7 @@ with tab2:
     
     st.subheader("1. Dyżury Ustalone (Fixed)")
     fixed_table_data = []
+    # Tylko jedna kolumna "Liczba Dyżurów" dla lekarzy Fixed
     for doc in FIXED_DOCTORS:
         fixed_table_data.append({"Lekarz": doc, "Liczba Dyżurów": fixed_counts[doc]})
     
@@ -545,36 +543,43 @@ with tab2:
         use_container_width=True
     )
     
+    # Aktualizacja sumy
     sum_fixed_table = edited_fixed_table["Liczba Dyżurów"].sum()
-    pool_for_rotation = total_days - sum_fixed_table
+    sum_fixed_rotational = sum(fixed_counts[d] for d in ROTATION_DOCTORS)
+    total_consumed = sum_fixed_table + sum_fixed_rotational
+    pool_for_rotation = total_days - total_consumed # Naprawiono (było sum_fixed_table)
     
     col1, col2, col3 = st.columns(3)
     col1.metric("Wszystkie dni", total_days)
-    col2.metric("Zajęte przez Grupę Fixed", sum_fixed_table)
-    col3.metric("Dla Grupy Rotacyjnej", max(0, pool_for_rotation))
+    col2.metric("Zajęte (Fixed)", total_consumed)
+    col3.metric("Dla Rotacji", max(0, pool_for_rotation))
     
     st.subheader("2. Limity Rotacyjne")
-    ts = len(ROTATION_DOCTORS)
-    base = max(0, pool_for_rotation) // ts if ts else 0
+    st.caption("Domyślnie dzielę pulę dni równo. Jeśli zostaną resztki, musisz dodać je ręcznie wybranym lekarzom, aż bilans się zgodzi.")
+    
+    team_size = len(ROTATION_DOCTORS)
+    # Równy podział w dół (bez faworyzowania nikogo na start)
+    base = max(0, pool_for_rotation) // team_size if team_size else 0
     
     lim_data = []
     for i, doc in enumerate(ROTATION_DOCTORS):
         lim_data.append({"Lekarz": doc, "Limit": base})
         
-    ed_rot = st.data_editor(pd.DataFrame(lim_data), column_config={"Limit": st.column_config.NumberColumn(min_value=0, max_value=31, step=1)}, hide_index=True, use_container_width=True)
+    edited_limits = st.data_editor(pd.DataFrame(lim_data), column_config={"Limit": st.column_config.NumberColumn(min_value=0, max_value=31, step=1)}, hide_index=True, use_container_width=True)
     
-    current_rot_sum = ed_rot["Limit"].sum()
-    total_planned = current_rot_sum + sum_fixed_table
+    current_rot_sum = edited_limits["Limit"].sum()
+    total_planned = current_rot_sum + total_consumed # Naprawiono (było sum_fixed_table)
     
     if total_planned == total_days:
         st.success("Bilans zgodny.")
         if st.button("🚀 GENERUJ GRAFIKI", type="primary"):
-            limits = {}
-            for _, r in ed_rot.iterrows(): limits[r['Lekarz']] = r['Limit']
-            for _, r in edited_fixed_table.iterrows(): limits[r['Lekarz']] = r['Liczba Dyżurów']
+            targets = {}
+            for _, r in edited_limits.iterrows(): targets[r['Lekarz']] = r['Limit']
+            # POPRAWKA: Pobieramy cel z nowej kolumny "Liczba Dyżurów"
+            for _, r in edited_fixed_table.iterrows(): targets[r['Lekarz']] = r['Liczba Dyżurów']
             
             with st.spinner(f"Optymalizacja (analiza {attempts_count} wariantów pod kątem sprawiedliwości)..."):
-                sch, stats, dbg, sc = generate_optimized(dates_gen, all_prefs, limits, real_last_duty, attempts_count)
+                sch, stats, dbg, sc = generate_optimized(dates_gen, all_prefs, targets, real_last_duty, attempts_count)
             
             st.markdown("### 📅 Tabela 1: Grafik Dyżurowy")
             res, fails = [], []
@@ -632,5 +637,5 @@ with tab2:
             except Exception as e: st.error(f"Błąd PDF: {e}")
 
     else:
-        diff = total_days - planned
-        st.warning(f"⚠️ Bilans się nie zgadza! Suma ({planned}) < Dni ({total_days}). Brakuje: {diff}. Dodaj je w tabeli Rotacyjnej.")
+        diff = total_days - total_planned
+        st.warning(f"⚠️ Bilans się nie zgadza! Suma ({total_planned}) < Dni ({total_days}). Brakuje: {diff}. Dodaj je w tabeli Rotacyjnej.")
