@@ -164,6 +164,8 @@ def get_repo():
         st.error(f"Błąd GitHub: {e}")
         return None
 
+# POPRAWKA TUTAJ: Dodano dekorator cache, aby metoda .clear() działała
+@st.cache_data(ttl=60)
 def load_data():
     repo = get_repo()
     if not repo: return pd.DataFrame(columns=["Data", "Lekarz", "Status"])
@@ -519,10 +521,8 @@ with tab2:
                     "Data": d, "Info": get_day_description(d), 
                     "Dyżurny": assigned, "_is_red": is_free
                 })
-                # Zbieranie szczegółowych przyczyn dla nieobsadzonych dni
                 if assigned == "BRAK":
                     if d_s in dbg and dbg[d_s]:
-                        # Formatowanie: Jędrzej: Limit, Filip: Niedostępny
                         reason_str = ", ".join([f"**{k}**: {v}" for k,v in dbg[d_s].items()])
                         fails.append(f"🔴 **{d.strftime('%d.%m')} ({get_day_description(d)}):** {reason_str}")
                     else:
@@ -530,11 +530,10 @@ with tab2:
 
             df_res = pd.DataFrame(res_rows)
             
-            # --- SEKCJA BŁĘDÓW NA GÓRZE ---
             if fails:
                 st.error("⚠️ UWAGA! Nie udało się obsadzić poniższych dni (najlepszy znaleziony wariant). Zwiększ limity lub dostępność:")
                 for f in fails:
-                    st.write(f) # st.write zamiast markdown dla lepszej czytelności długich linii
+                    st.write(f)
                 st.divider()
             else:
                 st.balloons()
