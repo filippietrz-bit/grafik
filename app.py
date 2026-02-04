@@ -164,7 +164,6 @@ def get_repo():
         st.error(f"Błąd GitHub: {e}")
         return None
 
-# POPRAWKA TUTAJ: Dodano dekorator cache, aby metoda .clear() działała
 @st.cache_data(ttl=60)
 def load_data():
     repo = get_repo()
@@ -279,7 +278,6 @@ def _generate_single_schedule(dates, prefs_map, target_limits):
         next_day = (d + datetime.timedelta(days=1)).strftime('%Y-%m-%d')
 
         for doc in ROTATION_DOCTORS:
-            # Rejestrujemy powód odrzucenia dla każdego
             if stats[doc]['Total'] >= target_limits.get(doc, 0):
                 daily_rejections[doc] = f"Limit({stats[doc]['Total']})"
                 continue
@@ -470,12 +468,22 @@ with tab2:
     
     st.subheader("Dyżury Ustalone (Fixed)")
     fixed_table_data = []
+    # POPRAWKA: Tylko jedna kolumna "Liczba Dyżurów" dla lekarzy Fixed
     for doc in FIXED_DOCTORS:
-        fixed_table_data.append({"Lekarz": doc, "Z bazy": fixed_counts_map[doc], "Do Obliczeń": fixed_counts_map[doc]})
+        fixed_table_data.append({"Lekarz": doc, "Liczba Dyżurów": fixed_counts_map[doc]})
     
-    edited_fixed_table = st.data_editor(pd.DataFrame(fixed_table_data), column_config={"Lekarz": st.column_config.TextColumn(disabled=True), "Z bazy": st.column_config.NumberColumn(disabled=True), "Do Obliczeń": st.column_config.NumberColumn(min_value=0, max_value=31, step=1)}, hide_index=True, use_container_width=True)
+    edited_fixed_table = st.data_editor(
+        pd.DataFrame(fixed_table_data),
+        column_config={
+            "Lekarz": st.column_config.TextColumn(disabled=True),
+            "Liczba Dyżurów": st.column_config.NumberColumn(min_value=0, max_value=31, step=1)
+        },
+        hide_index=True, 
+        use_container_width=True
+    )
     
-    sum_fixed_table = edited_fixed_table["Do Obliczeń"].sum()
+    # Aktualizacja sumy
+    sum_fixed_table = edited_fixed_table["Liczba Dyżurów"].sum()
     sum_fixed_rotational = sum(fixed_counts_map[d] for d in ROTATION_DOCTORS)
     total_consumed = sum_fixed_table + sum_fixed_rotational
     rem_days = total_days - total_consumed
@@ -506,7 +514,8 @@ with tab2:
         if st.button("🚀 GENERUJ", type="primary"):
             targets = {}
             for _, r in edited_limits.iterrows(): targets[r['Lekarz']] = r['Limit']
-            for _, r in edited_fixed_table.iterrows(): targets[r['Lekarz']] = r['Do Obliczeń']
+            # POPRAWKA: Pobieramy cel z nowej kolumny "Liczba Dyżurów"
+            for _, r in edited_fixed_table.iterrows(): targets[r['Lekarz']] = r['Liczba Dyżurów']
             
             with st.spinner(f"Symulacja {attempts_count} wariantów..."):
                 sch, stats, dbg, score = generate_optimized_schedule(dates_gen, all_prefs, targets, attempts_count)
@@ -526,19 +535,17 @@ with tab2:
                         reason_str = ", ".join([f"**{k}**: {v}" for k,v in dbg[d_s].items()])
                         fails.append(f"🔴 **{d.strftime('%d.%m')} ({get_day_description(d)}):** {reason_str}")
                     else:
-                        fails.append(f"🔴 **{d.strftime('%d.%m')}:** Brak dostępnych lekarzy rotacyjnych (wszyscy niedostępni/zablokowani).")
+                        fails.append(f"🔴 **{d.strftime('%d.%m')}:** Brak dostępnych lekarzy rotacyjnych.")
 
             df_res = pd.DataFrame(res_rows)
             
             if fails:
-                st.error("⚠️ UWAGA! Nie udało się obsadzić poniższych dni (najlepszy znaleziony wariant). Zwiększ limity lub dostępność:")
-                for f in fails:
-                    st.write(f)
+                st.error("⚠️ UWAGA! Nie udało się obsadzić poniższych dni:")
+                for f in fails: st.write(f)
                 st.divider()
             else:
                 st.balloons()
             
-            # PDF
             try:
                 pdf_bytes = create_pdf_bytes(df_res, f"Grafik {sel_period_name} {sel_year}")
                 st.download_button(label="📥 Pobierz Grafik jako PDF", data=pdf_bytes, file_name=f"grafik_{sel_period_name}_{sel_year}.pdf", mime="application/pdf")
@@ -551,8 +558,19 @@ with tab2:
             st.dataframe(df_res.style.apply(style_rows, axis=1).format({"Data": lambda t: t.strftime("%Y-%m-%d")}), use_container_width=True, height=600, column_config={"_is_red": None})
             
             st.write("---")
-            s_rows = [{"Lekarz": d, "Cel": targets.get(d,0), "Wynik": stats[d]['Total'], **{k:v for k,v in stats[d].items() if k!='Total'}} for d in ALL_DOCTORS]
-            st.dataframe(pd.DataFrame(s_rows), hide_index=True)
+            s_rows = []
+            for d in ALL_DOCTORS:
+                goal = targets.get(d, 0)
+                row = {
+                    "Lekarz": d, 
+                    "Cel": goal, 
+                    "Wynik": stats[d]['Total']
+                }
+                if d in ROTATION_DOCTORS:
+                    row.update({k: v for k, v in stats[d].items() if k != 'Total'})
+                s_rows.append(row)
+
+            st.dataframe(pd.DataFrame(s_rows).fillna(""), hide_index=True)
             
     else:
         st.warning(f"Suma dyżurów ({total_planned}) != Liczba dni ({total_days}). Różnica: {total_planned - total_days}")
