@@ -324,7 +324,7 @@ def generate_optimized(dates, df, limits, last_duty_prev, attempts=500):
         filled_days = sum(1 for v in sch.values() if v != "BRAK")
         score += filled_days * 1_000_000 
         
-        # Sprawiedliwość (Wariancja w grupach dni)
+        # Sprawiedliwość - Sprawdzamy wszystkie grupy dni
         total_variance_penalty = 0
         for g in DAY_GROUPS_LIST:
             cnts = [sts[d][g] for d in ROTATION_DOCTORS]
@@ -429,7 +429,43 @@ def generate_daily_work(dates, duty_schedule, preferences_df, last_duty_prev):
 
 # --- UI ---
 st.set_page_config(page_title="Grafik Urologia", layout="wide", page_icon="🏥")
+
+# HEADER I INSTRUKCJA
 st.title("🏥 Grafik Dyżurowy - Urologia")
+
+with st.expander("ℹ️ Instrukcja obsługi i zasady (Kliknij, aby rozwinąć)", expanded=False):
+    st.markdown(f"""
+    ### Witaj w systemie planowania pracy Oddziału Urologii!
+    Aplikacja służy do sprawiedliwego generowania dyżurów oraz harmonogramów pracy dziennej z uwzględnieniem kodeksu pracy.
+
+    #### 👨‍⚕️ Jak korzystać?
+    **KROK 1: Zakładka '📝 Dostępność'**
+    1. Wybierz swoje nazwisko z listy.
+    2. **Jeśli jesteś lekarzem 'Fixed' ({', '.join(FIXED_DOCTORS)}):**
+       - Dodaj do listy tylko te dni, w które masz ustalony dyżur. Użyj przycisku `+`.
+    3. **Jeśli jesteś lekarzem 'Rotacyjnym' ({', '.join(ROTATION_DOCTORS)}):**
+       - Wypełnij tabelę dostępności na cały okres.
+       - Zaznacz `Niedostępny` w dni, kiedy nie możesz dyżurować.
+       - Jeśli bierzesz urlop lub jedziesz na kurs, wybierz odpowiednią opcję w kolumnie `Przyczyna` (ważne dla grafiku dziennego!).
+    4. Kliknij `Zapisz`. Twoje dane trafią do wspólnej bazy.
+
+    **KROK 2: Zakładka '🧮 Grafik' (Dla planującego)**
+    1. Wybierz, kto dyżurował w ostatni dzień poprzedniego miesiąca.
+    2. Sprawdź tabelę **"Dyżury Ustalone (Fixed)"** - tu są sztywne dyżury (np. Jakuba Sz.). Możesz edytować ich liczbę.
+    3. Sprawdź tabelę **"Limity Rotacyjne"**:
+       - System automatycznie dzieli pulę dni (dni minus dyżury Fixed) po równo między lekarzy rotacyjnych.
+       - Jeśli dni nie dzielą się równo, na dole pojawi się komunikat (np. "Brakuje 2 dyżurów").
+       - Dodaj ręcznie te brakujące dyżury wybranym osobom w kolumnie `Limit`.
+    4. Kliknij `🚀 GENERUJ GRAFIKI`.
+    5. Pobierz gotowe pliki PDF.
+
+    #### ⚖️ Zasady Algorytmu
+    * **Priorytet:** Lekarze 'Fixed' mają pierwszeństwo.
+    * **Sprawiedliwość:** Algorytm szuka układu, w którym każdy lekarz rotacyjny ma podobną liczbę dyżurów w każdej grupie dni (pn, wt/śr, czw, pt, sob, nd).
+    * **Odpoczynek:** System pilnuje zejścia po dyżurze.
+    * **Kodeks Pracy (48h):** Dla lekarzy bez klauzuli opt-out system pilnuje limitu 48h/tydzień.
+    * **Reguła Sobotnia:** Kacper i Daniel po dyżurze w sobotę mają wolny poniedziałek.
+    """)
 
 with st.sidebar:
     st.header("Ustawienia")
@@ -542,7 +578,6 @@ with tab2:
     )
     
     sum_fixed_table = edited_fixed_table["Liczba Dyżurów"].sum()
-    # POPRAWKA: Pula dla rotacji = Wszystkie Dni - Dni zabrane przez grupę FIXED
     pool_for_rotation = total_days - sum_fixed_table
     
     col1, col2, col3 = st.columns(3)
@@ -554,7 +589,6 @@ with tab2:
     st.caption("Domyślnie dzielę pulę dni równo. Jeśli zostaną resztki, musisz dodać je ręcznie wybranym lekarzom, aż bilans się zgodzi.")
     
     team_size = len(ROTATION_DOCTORS)
-    # POPRAWKA: Równy podział puli dostępnej dla grupy rotacyjnej
     base = max(0, pool_for_rotation) // team_size if team_size else 0
     
     lim_data = []
@@ -564,7 +598,7 @@ with tab2:
     ed_rot = st.data_editor(pd.DataFrame(lim_data), column_config={"Limit": st.column_config.NumberColumn(min_value=0, max_value=31, step=1)}, hide_index=True, use_container_width=True)
     
     current_rot_sum = ed_rot["Limit"].sum()
-    total_planned = current_rot_sum + sum_fixed_table # Ujednolicona nazwa zmiennej
+    total_planned = current_rot_sum + sum_fixed_table
     
     if total_planned == total_days:
         st.success("Bilans zgodny.")
@@ -632,6 +666,5 @@ with tab2:
             except Exception as e: st.error(f"Błąd PDF: {e}")
 
     else:
-        # FIX: Poprawiony komunikat błędu z użyciem total_planned
         diff = total_days - total_planned
         st.warning(f"⚠️ Bilans się nie zgadza! Suma ({total_planned}) < Dni ({total_days}). Brakuje: {diff}. Dodaj je w tabeli Rotacyjnej.")
