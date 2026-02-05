@@ -9,20 +9,23 @@ from fpdf import FPDF
 
 # --- KONFIGURACJA ZESPOŁU ---
 
+# Grupa 1: Fixed (Nadrzędna) - Wybierają konkretne dni, nie biorą udziału w losowaniu reszty
 FIXED_DOCTORS = [
     "Jakub Sz.", "Gerard", "Tomasz", "Rafał", "Marcin", "Weronika", "Daniel"
 ]
 
+# Grupa 2: Rotacyjna - Biorą udział w losowaniu
 ROTATION_DOCTORS = [
     "Jędrzej", "Filip", "Ihab", "Kacper", "Jakub", "Tymoteusz"
 ]
 
 # Lekarze objęci limitem 48h (Bez Opt-Out)
+# Kacper i Daniel są tu wyłączeni (mogą przekraczać normę)
 NO_OPTOUT_DOCTORS = [
     "Jędrzej", "Filip", "Ihab", "Jakub", "Tymoteusz"
 ]
 
-# Lekarze z regułą: Dyżur Sobota -> Wolny Poniedziałek
+# Lekarze ze specjalną zasadą: Dyżur Sobota -> Wolny Poniedziałek
 SATURDAY_RULE_DOCTORS = ["Daniel", "Kacper"]
 
 ALL_DOCTORS = FIXED_DOCTORS + ROTATION_DOCTORS
@@ -138,7 +141,8 @@ def get_period_dates(year, start_month):
 def get_week_key(date_obj):
     p_start, _ = get_settlement_period_info(date_obj.year, date_obj.month)
     days = (date_obj - p_start).days
-    return f"{date_obj.year}_M{p_start.month}_W{days // 7}"
+    week_index = days // 7
+    return f"{date_obj.year}_M{p_start.month}_W{week_index}"
 
 def get_day_group(date_obj):
     wd = date_obj.weekday()
@@ -270,7 +274,7 @@ def _generate_single_schedule(dates, prefs_map, target_limits, last_duty_prev_pe
     # 2. ROTACJA
     days_to_fill = [d for d in dates if d.strftime('%Y-%m-%d') not in schedule]
     
-    # Sortowanie: najpierw trudne dni (mało dostępnych lekarzy)
+    # Sortowanie: najpierw trudne dni
     def count_availability(day_obj):
         d_s = day_obj.strftime('%Y-%m-%d')
         return sum(1 for doc in ROTATION_DOCTORS if prefs_map.get(d_s, {}).get(doc, {}).get('Status') != STATUS_UNAVAILABLE)
@@ -299,7 +303,7 @@ def _generate_single_schedule(dates, prefs_map, target_limits, last_duty_prev_pe
             candidates.append({'name': doc, 'w': w, 'gc': stats[doc][group], 'tc': stats[doc]['Total']})
 
         if candidates:
-            # Wagi sortowania: Waga > Grupa Dni > Total > Random
+            # Sortowanie: waga > grupa dni > suma ogólna > losowo
             candidates.sort(key=lambda x: (-x['w'], x['gc'], x['tc'], random.random()))
             chosen = candidates[0]['name']
             schedule[d_str] = chosen
@@ -325,7 +329,7 @@ def generate_optimized(dates, df, limits, last_duty_prev, attempts=500):
     for _ in range(attempts):
         sch, sts, dbg = _generate_single_schedule(dates, prefs_map, limits, last_duty_prev)
         
-        # Scoring System
+        # --- SCORING SYSTEM ---
         score = 0
         filled_days = sum(1 for v in sch.values() if v != "BRAK")
         score += filled_days * 1_000_000 
@@ -337,6 +341,7 @@ def generate_optimized(dates, df, limits, last_duty_prev, attempts=500):
             if cnts:
                 diff = max(cnts) - min(cnts)
                 total_variance_penalty += diff * 1000 
+        
         score -= total_variance_penalty
         
         # Preferencje
@@ -436,20 +441,9 @@ def generate_daily_work(dates, duty_schedule, preferences_df, last_duty_prev):
 
 # --- UI ---
 st.set_page_config(page_title="Grafik Urologia", layout="wide", page_icon="🏥")
-st.title("🏥 Grafik Dyżurowy - Urologia")
 
-with st.sidebar:
-    st.header("Ustawienia")
-    periods = ["Styczeń - Luty", "Marzec - Kwiecień", "Maj - Czerwiec", "Lipiec - Sierpień", "Wrzesień - Październik", "Listopad - Grudzień"]
-    today = datetime.date.today()
-    default_idx = (today.month - 1) // 2
-    sel_period_name = st.selectbox("Okres", periods, index=default_idx)
-    sel_year = st.number_input("Rok", 2025, 2030, today.year)
-    start_m = {"Styczeń - Luty": 1, "Marzec - Kwiecień": 3, "Maj - Czerwiec": 5, "Lipiec - Sierpień": 7, "Wrzesień - Październik": 9, "Listopad - Grudzień": 11}[sel_period_name]
-    
-    p_start, p_day = get_settlement_period_info(sel_year, start_m)
-    st.info(f"Start: {p_start} ({p_day}).")
-    attempts_count = st.slider("Próby AI", 100, 1000, 300)
+# HEADER I INSTRUKCJA
+st.title("🏥 Grafik Dyżurowy - Urologia")
 
 with st.expander("ℹ️ Instrukcja obsługi i zasady (Kliknij, aby zwinąć)", expanded=True):
     st.markdown(f"""
@@ -465,6 +459,19 @@ with st.expander("ℹ️ Instrukcja obsługi i zasady (Kliknij, aby zwinąć)", 
     2. Zweryfikuj limity.
     3. Kliknij `🚀 GENERUJ`.
     """)
+
+with st.sidebar:
+    st.header("Ustawienia")
+    periods = ["Styczeń - Luty", "Marzec - Kwiecień", "Maj - Czerwiec", "Lipiec - Sierpień", "Wrzesień - Październik", "Listopad - Grudzień"]
+    today = datetime.date.today()
+    default_idx = (today.month - 1) // 2
+    sel_period_name = st.selectbox("Okres", periods, index=default_idx)
+    sel_year = st.number_input("Rok", 2025, 2030, today.year)
+    start_m = {"Styczeń - Luty": 1, "Marzec - Kwiecień": 3, "Maj - Czerwiec": 5, "Lipiec - Sierpień": 7, "Wrzesień - Październik": 9, "Listopad - Grudzień": 11}[sel_period_name]
+    
+    p_start, p_day = get_settlement_period_info(sel_year, start_m)
+    st.info(f"Start: {p_start} ({p_day}).")
+    attempts_count = st.slider("Próby AI", 100, 1000, 300)
 
 tab1, tab2 = st.tabs(["📝 Dostępność", "🧮 Grafik"])
 
@@ -512,7 +519,7 @@ with tab1:
             "Data": st.column_config.DateColumn(disabled=True, format="DD.MM.YYYY"),
             "Info": st.column_config.TextColumn(disabled=True),
             "Status": st.column_config.SelectboxColumn(options=[STATUS_AVAILABLE, STATUS_RELUCTANT, STATUS_FIXED, STATUS_UNAVAILABLE], required=True),
-            "Przyczyna": st.column_config.SelectboxColumn(options=REASONS)
+            "Przyczyna": st.column_config.SelectboxColumn("Przyczyna (tylko dla 'Niedostępny')", options=REASONS)
         }
         num_rows_mode = "fixed"
 
@@ -574,24 +581,35 @@ with tab2:
     fixed_df = pd.DataFrame([{"Lekarz": d, "Liczba Dyżurów": fixed_counts[d]} for d in FIXED_DOCTORS])
     ed_fixed = st.data_editor(fixed_df, column_config={"Lekarz": st.column_config.TextColumn(disabled=True)}, hide_index=True, use_container_width=True)
     
-    sum_fixed = ed_fixed["Liczba Dyżurów"].sum() + sum(fixed_counts[d] for d in ROTATION_DOCTORS)
-    pool = total_days - sum_fixed
+    sum_fixed_table = ed_fixed["Liczba Dyżurów"].sum()
+    sum_fixed_rotational = sum(fixed_counts[d] for d in ROTATION_DOCTORS)
+    total_consumed = sum_fixed_table + sum_fixed_rotational
+    pool_for_rotation = total_days - total_consumed
     
     col1, col2, col3 = st.columns(3)
     col1.metric("Wszystkie dni", total_days)
-    col2.metric("Zajęte (Fixed)", sum_fixed)
-    col3.metric("Dla Rotacji", max(0, pool))
+    col2.metric("Zajęte (Fixed)", total_consumed)
+    col3.metric("Dla Rotacji", max(0, pool_for_rotation))
     
     # 2. ROTACJA
     st.subheader("2. Limity Rotacyjne")
     ts = len(ROTATION_DOCTORS)
-    base = max(0, pool) // ts if ts else 0
-    rot_df = pd.DataFrame([{"Lekarz": d, "Limit": base} for d in ROTATION_DOCTORS])
-    ed_rot = st.data_editor(rot_df, column_config={"Limit": st.column_config.NumberColumn(step=1)}, hide_index=True, use_container_width=True)
     
-    planned = ed_rot["Limit"].sum() + sum_fixed
+    # FIX: Pula dzielona równo na wszystkich (bo każdy chce tyle samo dyżurów)
+    # Dodajemy do tego to co już mają fixed, żeby limit był CAŁKOWITY
+    base = max(0, pool_for_rotation) // ts if ts else 0
     
-    if planned == total_days:
+    lim_data = []
+    for i, doc in enumerate(ROTATION_DOCTORS):
+        existing = fixed_counts[doc]
+        lim_data.append({"Lekarz": doc, "Limit": base + existing})
+        
+    ed_rot = st.data_editor(pd.DataFrame(lim_data), column_config={"Limit": st.column_config.NumberColumn(min_value=0, max_value=31, step=1)}, hide_index=True, use_container_width=True)
+    
+    current_rot_sum = ed_rot["Limit"].sum()
+    total_planned = current_rot_sum + sum_fixed_table
+    
+    if total_planned == total_days:
         st.success("Bilans zgodny.")
         if st.button("🚀 GENERUJ GRAFIKI", type="primary"):
             limits = {}
@@ -601,36 +619,34 @@ with tab2:
             with st.spinner(f"Optymalizacja (analiza {attempts_count} wariantów)..."):
                 sch, stats, dbg, sc = generate_optimized(dates_gen, all_prefs, limits, real_last_duty, attempts_count)
             
-            # WYNIKI
+            st.markdown("### 📅 Tabela 1: Grafik Dyżurowy")
             res, fails = [], []
             for d in dates_gen:
                 d_s = d.strftime('%Y-%m-%d')
                 ass = sch.get(d_s, "BRAK")
                 res.append({"Data": d, "Info": get_day_description(d), "Dyżurny": ass, "_is_red": is_red_day(d)})
                 if ass == "BRAK":
-                    reason = ", ".join([f"**{k}**: {v}" for k,v in dbg[d_s].items()]) if d_s in dbg else "Brak chętnych"
-                    fails.append(f"🔴 **{d.strftime('%d.%m')}:** {reason}")
+                    reason_str = ", ".join([f"**{k}**: {v}" for k,v in dbg[d_s].items()]) if d_s in dbg and dbg[d_s] else "Brak chętnych"
+                    fails.append(f"🔴 **{d.strftime('%d.%m')}:** {reason_str}")
 
             df_res = pd.DataFrame(res)
             if fails:
-                st.error("⚠️ Błędy obsady:")
+                st.error("⚠️ UWAGA! Nie udało się obsadzić dni:")
                 for f in fails: st.write(f)
+                st.divider()
             else: st.balloons()
             
-            # Styles
+            try:
+                pdf = create_pdf_bytes(df_res, f"Grafik {sel_period_name}")
+                st.download_button("📥 PDF (Dyżury)", pdf, "grafik.pdf", "application/pdf")
+            except: pass
+
             def style_dyzur(r):
                 if r['Dyżurny'] == "BRAK": return ['background-color: #ffcccc; color: red; font-weight: bold'] * len(r)
                 return ['color: #D81B60; font-weight: bold'] * len(r) if r['_is_red'] else [''] * len(r)
 
             st.dataframe(df_res.style.apply(style_dyzur, axis=1).format({"Data": lambda t: t.strftime("%Y-%m-%d")}), use_container_width=True, height=500, column_config={"_is_red": None})
             
-            # PDF Dyżury
-            try:
-                pdf = create_pdf_bytes(df_res, f"Grafik {sel_period_name}")
-                st.download_button("📥 PDF (Dyżury)", pdf, "grafik.pdf", "application/pdf")
-            except: pass
-
-            # STATYSTYKI
             st.write("---")
             s_rows = []
             for d in ROTATION_DOCTORS:
@@ -640,7 +656,6 @@ with tab2:
                 s_rows.append(row)
             st.dataframe(pd.DataFrame(s_rows).fillna("-"), hide_index=True)
 
-            # HARMONOGRAM PRACY
             st.markdown("---")
             st.markdown(f"### 🏢 Tabela 2: Harmonogram Pracy (Bez {FIXED_DOCTORS[0]})")
             df_daily = generate_daily_work(dates_gen, sch, all_prefs, real_last_duty)
@@ -660,5 +675,5 @@ with tab2:
             except Exception as e: st.error(f"Błąd PDF: {e}")
 
     else:
-        diff = total_days - planned
-        st.warning(f"⚠️ Bilans się nie zgadza! Suma ({planned}) < Dni ({total_days}). Brakuje: {diff}. Dodaj je w tabeli Rotacyjnej.")
+        diff = total_days - total_planned
+        st.warning(f"⚠️ Bilans się nie zgadza! Suma ({total_planned}) < Dni ({total_days}). Brakuje: {diff}. Dodaj je w tabeli Rotacyjnej.")
