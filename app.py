@@ -433,7 +433,7 @@ st.set_page_config(page_title="Grafik Urologia", layout="wide", page_icon="🏥"
 # HEADER I INSTRUKCJA
 st.title("🏥 Grafik Dyżurowy - Urologia")
 
-with st.expander("ℹ️ Instrukcja obsługi i zasady (Kliknij, aby rozwinąć)", expanded=False):
+with st.expander("ℹ️ Instrukcja obsługi i zasady (Kliknij, aby zwinąć)", expanded=True):
     st.markdown(f"""
     ### Witaj w systemie planowania pracy Oddziału Urologii!
     Aplikacja służy do sprawiedliwego generowania dyżurów oraz harmonogramów pracy dziennej z uwzględnieniem kodeksu pracy.
