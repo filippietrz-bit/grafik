@@ -10,13 +10,11 @@ import numpy as np
 
 # --- 1. KONFIGURACJA ZESPOŁU ---
 
-# Grupa PRIORYTETOWA (Fixed) - Ich "Sztywny Dyżur" nadpisuje wszystko inne
 FIXED_DOCTORS = [
     "Jakub Sz.", 
     "Daniel"
 ]
 
-# Grupa ROTACYJNA - Biorą udział w losowaniu, ich "Fixed" jest ważny tylko gdy grupa wyżej nie zajęła dnia
 ROTATION_DOCTORS = [
     "Jędrzej", 
     "Filip", 
@@ -26,13 +24,10 @@ ROTATION_DOCTORS = [
     "Tymoteusz"
 ]
 
-# Lekarze objęci limitem 48h (Bez Opt-Out)
-# Kacper i Daniel są wyłączeni (mogą pracować więcej)
 NO_OPTOUT_DOCTORS = [
     "Jędrzej", "Filip", "Ihab", "Jakub", "Tymoteusz"
 ]
 
-# Lekarze z regułą: Dyżur Sobota -> Wolny Poniedziałek
 SATURDAY_RULE_DOCTORS = ["Daniel", "Kacper"]
 
 ALL_DOCTORS = list(set(FIXED_DOCTORS + ROTATION_DOCTORS))
@@ -46,16 +41,12 @@ REASONS = ["", "Urlop", "Kurs", "Inne"]
 DATA_FILE = "data.csv"
 DAY_GROUPS_LIST = ["Poniedziałki", "Wtorki/Środy", "Czwartki", "Piątki", "Soboty", "Niedziele"]
 
-# --- KOLORY LEKARZY (RGB dla PDF - KONTRASTOWE) ---
+# --- KOLORY (Dla spójności) ---
 DOCTOR_COLORS = {
-    "Jakub Sz.": (50, 120, 220),   # Mocny Niebieski
-    "Daniel": (255, 140, 0),       # Soczysty Pomarańcz
-    "Jędrzej": (0, 180, 80),       # Ciemna Zieleń
-    "Filip": (220, 50, 50),        # Mocna Czerwień
-    "Ihab": (160, 60, 200),        # Fiolet
-    "Kacper": (255, 215, 0),       # Złoty/Żółty
-    "Jakub": (0, 180, 200),        # Turkus
-    "Tymoteusz": (230, 0, 100)     # Amarant
+    "Jakub Sz.": (50, 120, 220),   "Daniel": (255, 140, 0),
+    "Jędrzej": (0, 180, 80),       "Filip": (220, 50, 50),
+    "Ihab": (160, 60, 200),        "Kacper": (255, 215, 0),
+    "Jakub": (0, 180, 200),        "Tymoteusz": (230, 0, 100)
 }
 
 # --- 2. INFRASTRUKTURA I DANE ---
@@ -214,23 +205,21 @@ def create_pdf_bytes(dataframe, stats_dataframe, title):
         doc_raw = str(row['Dyżurny'])
         doc_str = remove_pl_chars(doc_raw)
         
-        # Kolor dla daty/dnia (weekendy/święta)
         is_red = row['_is_red']
         pdf.set_fill_color(255, 255, 255)
         if is_red:
-            pdf.set_fill_color(220, 220, 220) # Ciemniejszy szary dla lepszego kontrastu
+            pdf.set_fill_color(220, 220, 220)
         
         pdf.cell(35, 8, d_str, 1, 0, 'L', True)
         pdf.cell(50, 8, day_str, 1, 0, 'L', True)
         
-        # Kolor dla Lekarza (Kontrastowy)
         if doc_raw in DOCTOR_COLORS:
             r, g, b = DOCTOR_COLORS[doc_raw]
             pdf.set_fill_color(r, g, b)
         else:
              pdf.set_fill_color(255, 255, 255)
              if doc_raw == "BRAK":
-                 pdf.set_fill_color(255, 150, 150) # Mocniejszy czerwony
+                 pdf.set_fill_color(255, 150, 150)
 
         pdf.cell(80, 8, doc_str, 1, 1, 'L', True)
     
@@ -240,7 +229,6 @@ def create_pdf_bytes(dataframe, stats_dataframe, title):
     pdf.cell(0, 10, "Statystyki Dyzurow (Rotacja)", 0, 1, 'L')
     pdf.ln(2)
     
-    # Nagłówki statystyk
     pdf.set_font("Arial", 'B', 9)
     cols = list(stats_dataframe.columns)
     col_width = 180 / len(cols)
@@ -248,7 +236,6 @@ def create_pdf_bytes(dataframe, stats_dataframe, title):
         pdf.cell(col_width, 8, remove_pl_chars(col), 1, 0, 'C')
     pdf.ln()
     
-    # Dane statystyk
     pdf.set_font("Arial", size=9)
     pdf.set_fill_color(255, 255, 255)
     for _, row in stats_dataframe.iterrows():
@@ -258,9 +245,7 @@ def create_pdf_bytes(dataframe, stats_dataframe, title):
             pdf.set_fill_color(r, g, b)
         else:
             pdf.set_fill_color(255, 255, 255)
-
         pdf.cell(col_width, 8, remove_pl_chars(doc_name), 1, 0, 'C', True)
-        
         pdf.set_fill_color(255, 255, 255)
         for col in cols[1:]:
             pdf.cell(col_width, 8, str(row[col]), 1, 0, 'C', True)
@@ -272,54 +257,39 @@ def create_daily_pdf_bytes(dataframe, title):
     pdf = PDF(orientation='L')
     pdf.add_page()
     pdf.set_font("Arial", size=8)
-    
     safe_title = remove_pl_chars(title)
     pdf.set_font("Arial", 'B', 12)
     pdf.cell(0, 10, safe_title, 0, 1, 'L')
     pdf.ln(5)
-    
     cols = list(dataframe.columns)
     if "_is_red" in cols: cols.remove("_is_red")
-    
     page_width = pdf.w - 20
-    date_w = 20
-    day_w = 25
+    date_w = 20; day_w = 25
     doc_w = (page_width - date_w - day_w) / max(1, (len(cols) - 2))
-    
-    # Nagłówki
     pdf.set_font("Arial", 'B', 8)
-    pdf.set_fill_color(200, 200, 200)
     for col in cols:
         w = date_w if col == "Data" else (day_w if col == "Dzień" else doc_w)
-        pdf.cell(w, 8, remove_pl_chars(col), 1, 0, 'C', True)
+        pdf.cell(w, 8, remove_pl_chars(col), 1, 0, 'C')
     pdf.ln()
-    
-    # Dane
     pdf.set_font("Arial", size=7)
     for _, row in dataframe.iterrows():
-        is_weekend = row.get('_is_red', False)
-        
+        fill = row.get('_is_red', False)
+        if fill: pdf.set_fill_color(240, 240, 240)
         for col in cols:
             val = row[col]
-            txt_raw = str(val)
-            txt = val.strftime('%Y-%m-%d') if col == "Data" else remove_pl_chars(txt_raw)
+            txt = val.strftime('%Y-%m-%d') if col == "Data" else remove_pl_chars(str(val))
             w = date_w if col == "Data" else (day_w if col == "Dzień" else doc_w)
             
+            # Kolory w harmonogramie
             if col in ["Data", "Dzień"]:
-                pdf.set_fill_color(220, 220, 220) if is_weekend else pdf.set_fill_color(255, 255, 255)
+                pdf.set_fill_color(220, 220, 220) if fill else pdf.set_fill_color(255, 255, 255)
             else:
-                # KONTRASTOWE KOLORY STATUSÓW
-                if txt_raw == "ZEJŚCIE":
-                    pdf.set_fill_color(180, 180, 180) # Ciemny szary
-                elif "DYŻUR" in txt_raw:
-                    pdf.set_fill_color(100, 180, 240) # Żywy niebieski
-                elif "Wolne (48h)" in txt_raw:
-                    pdf.set_fill_color(240, 100, 100) # Żywy czerwony
-                elif txt_raw in ["Wolne", "Urlop", "Kurs"]:
-                    pdf.set_fill_color(255, 215, 0) # Żywy żółty/złoty
-                else:
-                    pdf.set_fill_color(255, 255, 255)
-
+                if txt == "ZEJSCIE": pdf.set_fill_color(180, 180, 180)
+                elif "DYZUR" in txt: pdf.set_fill_color(100, 180, 240)
+                elif "Wolne (48h)" in txt: pdf.set_fill_color(240, 100, 100)
+                elif txt in ["Wolne", "Urlop", "Kurs"]: pdf.set_fill_color(255, 215, 0)
+                else: pdf.set_fill_color(255, 255, 255)
+            
             pdf.cell(w, 6, txt, 1, 0, 'C', True)
         pdf.ln()
     return pdf.output(dest='S').encode('latin-1', 'replace')
@@ -339,10 +309,12 @@ def _generate_single_schedule(dates, prefs_map, target_limits, last_duty_prev_pe
         day_prefs = prefs_map.get(d_str, {})
         assigned = None
         
+        # Priorytet 1: Fixed Doctors
         for doc in FIXED_DOCTORS:
             if day_prefs.get(doc, {}).get('Status') == STATUS_FIXED:
                 assigned = doc; break
         
+        # Priorytet 2: Rotation Doctors (o ile Fixed nie zajął)
         if not assigned:
             candidates_fixed = [doc for doc in ROTATION_DOCTORS if day_prefs.get(doc, {}).get('Status') == STATUS_FIXED]
             if candidates_fixed:
@@ -351,8 +323,8 @@ def _generate_single_schedule(dates, prefs_map, target_limits, last_duty_prev_pe
                     if rejected != assigned:
                         denied_fixed_requests.append(f"{d_str}: {rejected} (konflikt z {assigned})")
         else:
-            conflicting_rotations = [doc for doc in ROTATION_DOCTORS if day_prefs.get(doc, {}).get('Status') == STATUS_FIXED]
-            for cr in conflicting_rotations:
+            conflicting = [doc for doc in ROTATION_DOCTORS if day_prefs.get(doc, {}).get('Status') == STATUS_FIXED]
+            for cr in conflicting:
                 denied_fixed_requests.append(f"{d_str}: {cr} (nadpisany przez {assigned})")
 
         if assigned:
@@ -379,7 +351,6 @@ def _generate_single_schedule(dates, prefs_map, target_limits, last_duty_prev_pe
         prev = (d - datetime.timedelta(days=1)).strftime('%Y-%m-%d')
         next_d = (d + datetime.timedelta(days=1)).strftime('%Y-%m-%d')
         prev_duty_doc = last_duty_prev_period if d == dates[0] else schedule.get(prev)
-        
         prev_sat = (d - datetime.timedelta(days=2)).strftime('%Y-%m-%d')
         is_monday = d.weekday() == 0
 
@@ -417,6 +388,43 @@ def _generate_single_schedule(dates, prefs_map, target_limits, last_duty_prev_pe
             debug_info[d_str] = rej
 
     return schedule, stats, debug_info, denied_fixed_requests
+
+# --- WALIDACJA KOŃCOWA (AUDYT) ---
+def validate_schedule_rules(schedule, prefs_map, dates, last_duty_prev):
+    violations = []
+    
+    for i, d in enumerate(dates):
+        d_str = d.strftime('%Y-%m-%d')
+        doc = schedule.get(d_str)
+        
+        if not doc or doc == "BRAK": continue
+        
+        # 1. Odpoczynek po dyżurze (11h)
+        prev_d = d - datetime.timedelta(days=1)
+        prev_doc = last_duty_prev if i == 0 else schedule.get(prev_d.strftime('%Y-%m-%d'))
+        if prev_doc == doc:
+            violations.append(f"🔴 {d_str}: {doc} ma dyżur dzień po dniu!")
+            
+        # 2. Dyżur w dzień niedostępny
+        status = prefs_map.get(d_str, {}).get(doc, {}).get('Status')
+        if status == STATUS_UNAVAILABLE:
+            reason = prefs_map.get(d_str, {}).get(doc, {}).get('Przyczyna', '')
+            violations.append(f"🔴 {d_str}: {doc} ma dyżur, a zgłosił: Niedostępny ({reason})")
+            
+        # 3. Dyżur przed niedostępnością (brak zejścia)
+        next_d = d + datetime.timedelta(days=1)
+        next_s = prefs_map.get(next_d.strftime('%Y-%m-%d'), {}).get(doc, {}).get('Status')
+        if next_s == STATUS_UNAVAILABLE:
+             reason = prefs_map.get(next_d.strftime('%Y-%m-%d'), {}).get(doc, {}).get('Przyczyna', '')
+             violations.append(f"🔴 {d_str}: {doc} ma dyżur przed dniem niedostępnym ({reason})")
+             
+        # 4. Reguła sobotnia (tylko Daniel i Kacper)
+        if doc in SATURDAY_RULE_DOCTORS and d.weekday() == 0: # Poniedziałek
+             sat = d - datetime.timedelta(days=2)
+             if schedule.get(sat.strftime('%Y-%m-%d')) == doc:
+                 violations.append(f"🔴 {d_str}: {doc} ma dyżur w Poniedziałek po pracującej Sobocie!")
+
+    return violations
 
 def generate_optimized(dates, df, limits, last_duty_prev, attempts=5000):
     random.seed(42)
@@ -641,7 +649,9 @@ with tab2:
             docs = group['Lekarz'].tolist()
             fix_docs = [d for d in docs if d in FIXED_DOCTORS]
             if len(fix_docs) > 1: conflicts.append(f"{d_check}: {', '.join(fix_docs)}")
-        if conflicts: st.error("⚠️ KONFLIKT FIXED!"); for c in conflicts: st.write(c)
+        if conflicts:
+            st.error("⚠️ KONFLIKT FIXED! (Data: Lekarze)")
+            for c in conflicts: st.write(c)
 
         for doc in ALL_DOCTORS:
             fixed_counts[doc] = len(p_data[(p_data['Lekarz'] == doc) & (p_data['Status'] == STATUS_FIXED)])
@@ -686,15 +696,22 @@ with tab2:
             
             with st.spinner(f"Optymalizacja (analiza {attempts_count} wariantów)..."):
                 sch, stats, dbg, denied = generate_optimized(dates_gen, all_prefs, limits, real_last_duty, attempts_count)
+                
+            # WALIDACJA KOŃCOWA
+            audit_errors = validate_schedule_rules(sch, all_prefs.set_index(['Data', 'Lekarz']).to_dict('index') if not all_prefs.empty else {}, dates_gen, real_last_duty)
             
-            st.markdown("### 📅 Tabela 1: Grafik Dyżurowy")
+            if audit_errors:
+                st.error("🚨 AUDYT WYKRYŁ BŁĘDY KRYTYCZNE (ZŁAMANE ZASADY):")
+                for err in audit_errors: st.write(err)
+                st.divider()
+
             res, fails = [], []
             for d in dates_gen:
                 d_s = d.strftime('%Y-%m-%d')
                 ass = sch.get(d_s, "BRAK")
                 res.append({"Data": d, "Info": get_day_description(d), "Dyżurny": ass, "_is_red": is_red_day(d)})
                 if ass == "BRAK":
-                    reason_str = ", ".join([f"**{k}**: {v}" for k,v in dbg[d_s].items()]) if d_s in dbg and dbg[d_s] else "Brak chętnych"
+                    reason_str = ", ".join([f"**{k}**: {v}" for k,v in dbg[d_s].items()]) if d_s in dbg else "Brak chętnych"
                     fails.append(f"🔴 **{d.strftime('%d.%m')}:** {reason_str}")
 
             df_res = pd.DataFrame(res)
@@ -705,7 +722,7 @@ with tab2:
             else: st.balloons()
             
             if denied:
-                st.warning("⚠️ Konflikty Fixed (Rotacyjny chciał Fixed, ale zajęte):")
+                st.warning("⚠️ Konflikty Fixed:")
                 for d_info in denied: st.write(d_info)
 
             def style_dyzur(r):
