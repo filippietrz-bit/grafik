@@ -6,16 +6,15 @@ import random
 from github import Github
 from io import StringIO
 from fpdf import FPDF
+import numpy as np
 
-# --- KONFIGURACJA ZESPOŁU ---
+# --- 1. KONFIGURACJA ZESPOŁU ---
 
-# Grupa PRIORYTETOWA (Fixed) - Ich "Sztywny Dyżur" nadpisuje wszystko inne
 FIXED_DOCTORS = [
     "Jakub Sz.", 
     "Daniel"
 ]
 
-# Grupa ROTACYJNA - Biorą udział w losowaniu, ich "Fixed" jest ważny tylko gdy grupa wyżej nie zajęła dnia
 ROTATION_DOCTORS = [
     "Jędrzej", 
     "Filip", 
@@ -25,38 +24,27 @@ ROTATION_DOCTORS = [
     "Tymoteusz"
 ]
 
-# Lekarze objęci limitem 48h (Bez Opt-Out)
-# Kacper i Daniel są wyłączeni (mogą pracować więcej)
 NO_OPTOUT_DOCTORS = [
     "Jędrzej", "Filip", "Ihab", "Jakub", "Tymoteusz"
 ]
 
-# Lekarze z regułą: Dyżur Sobota -> Wolny Poniedziałek
 SATURDAY_RULE_DOCTORS = ["Daniel", "Kacper"]
 
-# Pełna lista do selectboxów
 ALL_DOCTORS = list(set(FIXED_DOCTORS + ROTATION_DOCTORS))
 
-# Statusy dostępności
 STATUS_AVAILABLE = "Chcę dyżur (Dostępny)"
 STATUS_RELUCTANT = "Mogę (Niechętnie)"
 STATUS_UNAVAILABLE = "Niedostępny"
 STATUS_FIXED = "Sztywny Dyżur (Już ustalony)"
 
-# Przyczyny niedostępności (wpływają na licznik godzin pracy dziennej)
 REASONS = ["", "Urlop", "Kurs", "Inne"]
-
-# Plik bazy danych
 DATA_FILE = "data.csv"
-
-# Grupy dni do analizy sprawiedliwości
 DAY_GROUPS_LIST = ["Poniedziałki", "Wtorki/Środy", "Czwartki", "Piątki", "Soboty", "Niedziele"]
 
 # --- 2. INFRASTRUKTURA I DANE ---
 
 @st.cache_resource
 def get_repo():
-    """Łączy się z GitHubem."""
     try:
         token = st.secrets["github"]["token"]
         g = Github(token)
@@ -70,7 +58,6 @@ def get_repo():
 
 @st.cache_data(ttl=60)
 def load_data():
-    """Pobiera dane z CSV na GitHubie."""
     repo = get_repo()
     if not repo: return pd.DataFrame(columns=["Data", "Lekarz", "Status", "Przyczyna"])
     try:
@@ -81,7 +68,6 @@ def load_data():
     except: return pd.DataFrame(columns=["Data", "Lekarz", "Status", "Przyczyna"])
 
 def save_data(df):
-    """Zapisuje dane do CSV na GitHubie."""
     repo = get_repo()
     if not repo: return False
     if 'Przyczyna' not in df.columns: df['Przyczyna'] = ""
@@ -98,7 +84,6 @@ def save_data(df):
 
 @st.cache_data(ttl=3600)
 def get_polish_holidays(year):
-    """Zwraca słownik świąt w Polsce."""
     a = year % 19; b = year // 100; c = year % 100
     d = b // 4; e = b % 4; f = (b + 8) // 25
     g = (b - f + 1) // 3; h = (19 * a + b - d - g + 15) % 30
@@ -139,7 +124,6 @@ def get_day_description(date_obj):
     return day_name
 
 def get_settlement_period_info(year, month):
-    # Okresy 2-miesięczne: 1-2, 3-4, 5-6...
     start_month = month if month % 2 != 0 else month - 1
     start_date = datetime.date(year, start_month, 1)
     day_names = ['Poniedziałek', 'Wtorek', 'Środa', 'Czwartek', 'Piątek', 'Sobota', 'Niedziela']
@@ -155,7 +139,6 @@ def get_period_dates(year, start_month):
     return dates
 
 def get_week_key(date_obj):
-    """Zwraca ID tygodnia w okresie rozliczeniowym."""
     p_start, _ = get_settlement_period_info(date_obj.year, date_obj.month)
     days = (date_obj - p_start).days
     week_index = days // 7
@@ -170,7 +153,7 @@ def get_day_group(date_obj):
     if wd == 5: return "Soboty"
     return "Niedziele"
 
-# --- 4. GENEROWANIE PDF ---
+# --- PDF GENERATOR ---
 
 class PDF(FPDF):
     def header(self):
@@ -248,7 +231,7 @@ def _generate_single_schedule(dates, prefs_map, target_limits, last_duty_prev_pe
     stats = {doc: {'Total': 0, "Poniedziałki": 0, "Wtorki/Środy": 0, "Czwartki": 0, "Piątki": 0, "Soboty": 0, "Niedziele": 0} for doc in ALL_DOCTORS}
     weekly_counts = {}
     debug_info = {}
-    denied_fixed_requests = [] # Lista odrzuconych wniosków "Fixed" rotacyjnych
+    denied_fixed_requests = []
 
     # Faza 1: SZTYWNE DYŻURY (PRIORYTET FIXED > ROTATION FIXED)
     for d in dates:
@@ -263,17 +246,13 @@ def _generate_single_schedule(dates, prefs_map, target_limits, last_duty_prev_pe
         
         # 1B. Jeśli wolne, sprawdzamy lekarzy ROTACYJNYCH z prośbą FIXED
         if not assigned:
-            # Szukamy kandydatów rotacyjnych, którzy dali FIXED
             candidates_fixed = [doc for doc in ROTATION_DOCTORS if day_prefs.get(doc, {}).get('Status') == STATUS_FIXED]
             if candidates_fixed:
-                # Jeśli jest konflikt (dwóch rotacyjnych chce fixed), losujemy
                 assigned = random.choice(candidates_fixed)
-                # Reszta odrzucona
                 for rejected in candidates_fixed:
                     if rejected != assigned:
                         denied_fixed_requests.append(f"{d_str}: {rejected} (konflikt z {assigned})")
         else:
-            # Jeśli Fixed Doctor zajął termin, a Rotacyjny też chciał:
             conflicting_rotations = [doc for doc in ROTATION_DOCTORS if day_prefs.get(doc, {}).get('Status') == STATUS_FIXED]
             for cr in conflicting_rotations:
                 denied_fixed_requests.append(f"{d_str}: {cr} (nadpisany przez {assigned})")
@@ -289,7 +268,6 @@ def _generate_single_schedule(dates, prefs_map, target_limits, last_duty_prev_pe
     # Faza 2: DOPEŁNIANIE (TYLKO ROTACYJNI)
     days_to_fill = [d for d in dates if d.strftime('%Y-%m-%d') not in schedule]
     
-    # Heurystyka: Najpierw dni z najmniejszą liczbą dostępnych lekarzy
     def count_av(d_obj):
         d_s = d_obj.strftime('%Y-%m-%d')
         return sum(1 for doc in ROTATION_DOCTORS if prefs_map.get(d_s, {}).get(doc, {}).get('Status') != STATUS_UNAVAILABLE)
@@ -306,40 +284,22 @@ def _generate_single_schedule(dates, prefs_map, target_limits, last_duty_prev_pe
         next_d = (d + datetime.timedelta(days=1)).strftime('%Y-%m-%d')
         prev_duty_doc = last_duty_prev_period if d == dates[0] else schedule.get(prev)
         
-        # Reguła sobotnia (dla poniedziałków)
         prev_sat = (d - datetime.timedelta(days=2)).strftime('%Y-%m-%d')
         is_monday = d.weekday() == 0
 
         for doc in ROTATION_DOCTORS:
-            # 1. Limit (User decyduje, ale algorytm pilnuje celu)
             if stats[doc]['Total'] >= target_limits.get(doc, 0): rej[doc] = "Limit"; continue
-            
-            # 2. Niedostępność
             if prefs_map.get(d_str, {}).get(doc, {}).get('Status') == STATUS_UNAVAILABLE: rej[doc] = "ND"; continue
-            
-            # 3. Odpoczynek po dyżurze (11h)
             if prev_duty_doc == doc: rej[doc] = "Po"; continue
-            
-            # 4. Odpoczynek przed dyżurem (jeśli jutro ma fixed)
             if schedule.get(next_d) == doc: rej[doc] = "Przed"; continue
-            
-            # 5. Limit 48h (Max 2 dyżury w tygodniu dla NO_OPTOUT)
-            if doc in NO_OPTOUT_DOCTORS:
-                if weekly_counts.get(wk, {}).get(doc, 0) >= 2: rej[doc] = "Max2(48h)"; continue
-            
-            # 6. Reguła Sobotnia (Kacper) - Daniel jest Fixed, więc tu go nie ma, chyba że jest w Rotation list?
+            if weekly_counts.get(wk, {}).get(doc, 0) >= 2: rej[doc] = "Max2(48h)"; continue
             if is_monday and doc in SATURDAY_RULE_DOCTORS:
                 if schedule.get(prev_sat) == doc: rej[doc] = "Wolne(Sob)"; continue
 
-            # Wagi
-            pref_status = prefs_map.get(d_str, {}).get(doc, {}).get('Status')
-            w = 10 if pref_status == STATUS_AVAILABLE else (1 if pref_status == STATUS_RELUCTANT else 5)
-            
-            # Dążenie do sprawiedliwości: preferuj tych, którzy mają mniej w danej grupie dni
+            w = 10 if prefs_map.get(d_str, {}).get(doc, {}).get('Status') == STATUS_AVAILABLE else (1 if prefs_map.get(d_str, {}).get(doc, {}).get('Status') == STATUS_RELUCTANT else 5)
             candidates.append({'name': doc, 'w': w, 'gc': stats[doc][group], 'tc': stats[doc]['Total']})
 
         if candidates:
-            # Sortowanie: Waga malejąco > Liczba dyżurów w grupie rosnąco > Suma dyżurów rosnąco > Random
             candidates.sort(key=lambda x: (-x['w'], x['gc'], x['tc'], random.random()))
             chosen = candidates[0]['name']
             schedule[d_str] = chosen
@@ -354,10 +314,12 @@ def _generate_single_schedule(dates, prefs_map, target_limits, last_duty_prev_pe
     return schedule, stats, debug_info, denied_fixed_requests
 
 def generate_optimized(dates, df, limits, last_duty_prev, attempts=5000):
+    # Stabilizacja wyniku - to samo wejście da ten sam wynik
+    random.seed(42)
+    
     best_res = None
     best_score = -float('inf')
     
-    # Pre-processing preferencji
     prefs_map = {}
     if not df.empty:
         for r in df.to_dict('records'):
@@ -367,14 +329,10 @@ def generate_optimized(dates, df, limits, last_duty_prev, attempts=5000):
     for _ in range(attempts):
         sch, sts, dbg, denied = _generate_single_schedule(dates, prefs_map, limits, last_duty_prev)
         
-        # --- SCORING SYSTEM ---
         score = 0
-        
-        # 1. Kompletność (Najważniejsze)
         filled_days = sum(1 for v in sch.values() if v != "BRAK")
         score += filled_days * 1_000_000
         
-        # 2. Sprawiedliwość Grupowa (Odchylenie standardowe w grupach dni)
         variance_penalty = 0
         for g in DAY_GROUPS_LIST:
             cnts = [sts[d][g] for d in ROTATION_DOCTORS]
@@ -383,13 +341,12 @@ def generate_optimized(dates, df, limits, last_duty_prev, attempts=5000):
                 variance_penalty += diff * 1000 
         score -= variance_penalty
         
-        # 3. Preferencje (Unikanie "Niechętnych")
         pref_score = 0
         for d_str, doc in sch.items():
             if doc in ROTATION_DOCTORS and doc != "BRAK":
                 s = prefs_map.get(d_str, {}).get(doc, {}).get('Status', STATUS_AVAILABLE)
                 if s == STATUS_AVAILABLE: pref_score += 50
-                elif s == STATUS_RELUCTANT: pref_score -= 50 # Kara za użycie niechętnego
+                elif s == STATUS_RELUCTANT: pref_score -= 50
         score += pref_score
         
         if score > best_score:
@@ -426,33 +383,28 @@ def generate_daily_work(dates, duty_schedule, preferences_df, last_duty_prev):
         daily_staff_count = {d.strftime('%Y-%m-%d'): 0 for d in week_dates}
         doc_shift_hours = {doc: 0.0 for doc in daily_doctors}
 
-        # KROK A: Sztywne wpisy (Dyżury, Zejścia, Urlopy)
         for d in week_dates:
             d_s = d.strftime('%Y-%m-%d')
-            prev_d = d - datetime.timedelta(days=1)
+            prev_d_s = (d - datetime.timedelta(days=1)).strftime('%Y-%m-%d')
             is_red = is_red_day(d)
             duty = duty_schedule.get(d_s)
-            duty_prev = last_duty_prev if d == dates[0] else duty_schedule.get(prev_d.strftime('%Y-%m-%d'))
+            duty_prev = last_duty_prev if d == dates[0] else duty_schedule.get(prev_d_s)
 
             for doc in daily_doctors:
-                up = prefs_lookup.get(d_s, {}).get(doc, {})
+                user_prefs = prefs_lookup.get(d_s, {}).get(doc, {})
+                status_pref = user_prefs.get('Status')
+                reason = user_prefs.get('Przyczyna')
                 
-                # 1. Urlop/Kurs (Priorytet najwyższy, WLICZA SIĘ DO GODZIN)
-                if up.get('Status') == STATUS_UNAVAILABLE and up.get('Przyczyna') in ["Urlop", "Kurs"]:
-                    set_status(d, doc, up.get('Przyczyna'))
-                    doc_shift_hours[doc] += norma # --- WLICZAMY DO CZASU PRACY ---
-                
-                # 2. Dyżur
+                if status_pref == STATUS_UNAVAILABLE and reason in ["Urlop", "Kurs"]:
+                    set_status(d, doc, reason)
+                    doc_shift_hours[doc] += norma # Urlop/Kurs wlicza się do godzin
                 elif duty == doc:
                     set_status(d, doc, "DYŻUR 24h")
                     doc_shift_hours[doc] += 24.0
-                # 3. Zejście
                 elif duty_prev == doc:
                     set_status(d, doc, "ZEJŚCIE")
-                # 4. Weekend/Święto
                 elif is_red:
                     set_status(d, doc, "Wolne")
-                # 5. Sobota -> Poniedziałek (Daniel/Kacper)
                 elif doc in SATURDAY_RULE_DOCTORS and d.weekday() == 0:
                     last_sat = d - datetime.timedelta(days=2)
                     if duty_schedule.get(last_sat.strftime('%Y-%m-%d')) == doc:
@@ -462,47 +414,34 @@ def generate_daily_work(dates, duty_schedule, preferences_df, last_duty_prev):
                 else:
                     set_status(d, doc, "TBD")
 
-        # KROK B: Obsada (liczymy dostępnych)
         for d in week_dates:
-            daily_staff_count[d.strftime('%Y-%m-%d')] = sum(1 for doc in daily_doctors if get_s(d, doc) == "TBD")
+            # FIX: Zastąpiono get_s -> get_status
+            count = sum(1 for doc in daily_doctors if get_status(d, doc) == "TBD")
+            daily_staff_count[d.strftime('%Y-%m-%d')] = count
 
-        # KROK C: Limit 48h (Dla NO_OPTOUT)
-        # Uwaga: "Niedostępny (Inne)" liczymy jako obecność (7h35min) zgodnie z założeniem
         for doc in NO_OPTOUT_DOCTORS:
             if doc not in daily_doctors: continue
-            
-            used = doc_shift_hours[doc]
-            remaining = 48.0 - used
-            
-            # Ile dni roboczych może jeszcze przepracować?
+            remaining = 48.0 - doc_shift_hours[doc]
             max_days = int(remaining // norma)
             
-            candidates = [d for d in week_dates if get_s(d, doc) == "TBD"]
-            
-            # Czy ma zaznaczone "Niedostępny (Inne)"? Traktujemy to jak pracę
-            # (System nie wstawia go do pracy, ale zjada limit) - uproszczenie: wstawiamy "7:30 - 15:05"
+            # FIX: Zastąpiono get_s -> get_status
+            candidates = [d for d in week_dates if get_status(d, doc) == "TBD"]
             
             if len(candidates) <= max_days:
-                for d in candidates: 
-                    set_status(d, doc, "7:30 - 15:05")
+                for d in candidates: set_status(d, doc, "7:30 - 15:05")
             else:
-                # Musimy dać wolne. Wybieramy dni z największą obsadą.
                 candidates.sort(key=lambda x: daily_staff_count[x.strftime('%Y-%m-%d')], reverse=True)
                 num_to_drop = len(candidates) - max_days
-                
-                # Dni wolne (nadgodziny)
                 for d in candidates[:num_to_drop]:
                     set_status(d, doc, "Wolne (48h)")
                     daily_staff_count[d.strftime('%Y-%m-%d')] -= 1
-                
-                # Dni pracujące
                 for d in candidates[num_to_drop:]:
                     set_status(d, doc, "7:30 - 15:05")
 
-        # KROK D: Reszta (Opt-out)
         for doc in daily_doctors:
             for d in week_dates:
-                if get_s(d, doc) == "TBD": set_status(d, doc, "7:30 - 15:05")
+                # FIX: Zastąpiono get_s -> get_status
+                if get_status(d, doc) == "TBD": set_status(d, doc, "7:30 - 15:05")
 
     final_data = []
     for d in dates:
@@ -541,7 +480,6 @@ with st.sidebar:
     
     p_start, p_day = get_settlement_period_info(sel_year, start_m)
     st.info(f"Start: {p_start} ({p_day}).")
-    attempts_count = st.slider("Próby AI", 100, 1000, 300)
 
 tab1, tab2 = st.tabs(["📝 Dostępność", "🧮 Grafik"])
 
@@ -689,8 +627,8 @@ with tab2:
             for _, r in ed_rot.iterrows(): limits[r['Lekarz']] = r['Limit']
             for _, r in edited_fixed_table.iterrows(): limits[r['Lekarz']] = r['Liczba Dyżurów']
             
-            with st.spinner(f"Optymalizacja (analiza {attempts_count} wariantów)..."):
-                sch, stats, dbg, denied = generate_optimized(dates_gen, all_prefs, limits, real_last_duty, attempts_count)
+            with st.spinner(f"Optymalizacja (analiza 5000 wariantów)..."):
+                sch, stats, dbg, denied = generate_optimized(dates_gen, all_prefs, limits, real_last_duty, attempts=5000)
             
             st.markdown("### 📅 Tabela 1: Grafik Dyżurowy")
             res, fails = [], []
