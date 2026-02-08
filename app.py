@@ -9,18 +9,24 @@ from fpdf import FPDF
 
 # --- KONFIGURACJA ZESPOŁU ---
 
+# Grupa 1: Fixed (Nadrzędna) - Wybierają konkretne dni
+# Daniel wraca tutaj
 FIXED_DOCTORS = [
     "Jakub Sz.", "Gerard", "Tomasz", "Rafał", "Marcin", "Weronika", "Daniel"
 ]
 
+# Grupa 2: Rotacyjna - Biorą udział w losowaniu
+# Daniel usunięty stąd
 ROTATION_DOCTORS = [
     "Jędrzej", "Filip", "Ihab", "Kacper", "Jakub", "Tymoteusz"
 ]
 
+# Lekarze objęci limitem 48h (Bez Opt-Out)
 NO_OPTOUT_DOCTORS = [
     "Jędrzej", "Filip", "Ihab", "Jakub", "Tymoteusz"
 ]
 
+# Lekarze z regułą: Dyżur Sobota -> Wolny Poniedziałek
 SATURDAY_RULE_DOCTORS = ["Daniel", "Kacper"]
 
 ALL_DOCTORS = list(set(FIXED_DOCTORS + ROTATION_DOCTORS))
@@ -220,7 +226,7 @@ def create_daily_pdf_bytes(dataframe, title):
         pdf.ln()
     return pdf.output(dest='S').encode('latin-1', 'replace')
 
-# --- SILNIK GRAFIKU (HEURYSTYKA CSP) ---
+# --- SILNIK GRAFIKU ---
 
 def _generate_single_schedule(dates, prefs_map, target_limits, last_duty_prev_period):
     schedule = {} 
@@ -235,6 +241,7 @@ def _generate_single_schedule(dates, prefs_map, target_limits, last_duty_prev_pe
         assigned = None
         for doc in FIXED_DOCTORS:
             if day_prefs.get(doc, {}).get('Status') == STATUS_FIXED: assigned = doc; break
+        # Rotacyjni też mogą mieć fixed, ale rzadziej
         if not assigned:
             for doc in ROTATION_DOCTORS:
                 if day_prefs.get(doc, {}).get('Status') == STATUS_FIXED: assigned = doc; break
@@ -247,82 +254,52 @@ def _generate_single_schedule(dates, prefs_map, target_limits, last_duty_prev_pe
             if wk not in weekly_counts: weekly_counts[wk] = {}
             weekly_counts[wk][assigned] = weekly_counts[wk].get(assigned, 0) + 1
 
-    # 2. ROTACJA - HEURYSTYKA "NAJTRUDNIEJSZY PIERWSZY"
-    # Zamiast losować całą listę, w każdej iteracji wybieramy dzień, który ma NAJMNIEJ kandydatów
-    # (tzw. Minimum Remaining Values heuristic w CSP)
+    # 2. ROTACJA
+    days_to_fill = [d for d in dates if d.strftime('%Y-%m-%d') not in schedule]
+    def count_av(d_obj):
+        return sum(1 for doc in ROTATION_DOCTORS if prefs_map.get(d_obj.strftime('%Y-%m-%d'), {}).get(doc, {}).get('Status') != STATUS_UNAVAILABLE)
+    days_to_fill.sort(key=lambda x: (count_av(x), random.random()))
     
-    unassigned_days = [d for d in dates if d.strftime('%Y-%m-%d') not in schedule]
-    
-    # Kopiujemy stan, aby móc go modyfikować w pętli bez psucia
-    # Ale w tym prostym algorytmie greedy po prostu idziemy krok po kroku
-    
-    while unassigned_days:
-        # Obliczamy liczbę kandydatów dla każdego nieobsadzonego dnia
-        day_candidates = []
-        
-        for d in unassigned_days:
-            d_str = d.strftime('%Y-%m-%d')
-            wk = get_week_key(d)
-            prev = (d - datetime.timedelta(days=1)).strftime('%Y-%m-%d')
-            next_d = (d + datetime.timedelta(days=1)).strftime('%Y-%m-%d')
-            prev_duty_doc = last_duty_prev_period if d == dates[0] else schedule.get(prev)
+    for d in days_to_fill:
+        d_str = d.strftime('%Y-%m-%d')
+        wk = get_week_key(d)
+        group = get_day_group(d)
+        candidates = []
+        rej = {}
+        prev = (d - datetime.timedelta(days=1)).strftime('%Y-%m-%d')
+        next_d = (d + datetime.timedelta(days=1)).strftime('%Y-%m-%d')
+        prev_duty_doc = last_duty_prev_period if d == dates[0] else schedule.get(prev)
+
+        # Reguła sobotnia
+        prev_sat = (d - datetime.timedelta(days=2)).strftime('%Y-%m-%d')
+        is_monday = d.weekday() == 0
+
+        for doc in ROTATION_DOCTORS:
+            if stats[doc]['Total'] >= target_limits.get(doc, 0): rej[doc] = "Limit"; continue
+            if prefs_map.get(d_str, {}).get(doc, {}).get('Status') == STATUS_UNAVAILABLE: rej[doc] = "ND"; continue
+            if prev_duty_doc == doc: rej[doc] = "Po"; continue
+            if schedule.get(next_d) == doc: rej[doc] = "Przed"; continue
+            if weekly_counts.get(wk, {}).get(doc, 0) >= 2: rej[doc] = "Max2"; continue
             
-            valid_docs = []
-            reasons = {}
-            
-            for doc in ROTATION_DOCTORS:
-                # Sprawdzenie warunków
-                is_ok = True
-                fail_reason = ""
-                
-                if stats[doc]['Total'] >= target_limits.get(doc, 0): is_ok = False; fail_reason = "Limit"
-                elif prefs_map.get(d_str, {}).get(doc, {}).get('Status') == STATUS_UNAVAILABLE: is_ok = False; fail_reason = "ND"
-                elif prev_duty_doc == doc: is_ok = False; fail_reason = "Po"
-                elif schedule.get(next_d) == doc: is_ok = False; fail_reason = "Przed"
-                elif weekly_counts.get(wk, {}).get(doc, 0) >= 2: is_ok = False; fail_reason = "Max2"
-                
-                if is_ok:
-                    w = 10 if prefs_map.get(d_str, {}).get(doc, {}).get('Status') == STATUS_AVAILABLE else 1
-                    valid_docs.append({'name': doc, 'w': w, 'gc': stats[doc][get_day_group(d)], 'tc': stats[doc]['Total']})
-                else:
-                    reasons[doc] = fail_reason
-            
-            # Dodajemy dzień i jego kandydatów do listy
-            # Sortujemy kandydatów wg wag (żeby potem wziąć najlepszego)
-            valid_docs.sort(key=lambda x: (-x['w'], x['gc'], x['tc'], random.random()))
-            day_candidates.append({
-                'date': d, 
-                'candidates': valid_docs, 
-                'reasons': reasons
-            })
-        
-        # Sortujemy dni: Najpierw te z NAJMNIEJSZĄ liczbą kandydatów
-        # Jeśli liczba kandydatów równa, to losowo (żeby nie utykać w tym samym miejscu)
-        day_candidates.sort(key=lambda x: (len(x['candidates']), random.random()))
-        
-        # Bierzemy najtrudniejszy dzień
-        target = day_candidates[0]
-        d_target = target['date']
-        d_str_target = d_target.strftime('%Y-%m-%d')
-        
-        if not target['candidates']:
-            # Porażka dla tego dnia - nie da się obsadzić
-            schedule[d_str_target] = "BRAK"
-            debug_info[d_str_target] = target['reasons']
-        else:
-            # Sukces - wybieramy najlepszego kandydata
-            chosen = target['candidates'][0]['name']
-            schedule[d_str_target] = chosen
-            
-            # Aktualizacja liczników
+            if is_monday and doc in SATURDAY_RULE_DOCTORS:
+                if schedule.get(prev_sat) == doc:
+                    rej[doc] = "Wolne(Sob)"
+                    continue
+
+            w = 10 if prefs_map.get(d_str, {}).get(doc, {}).get('Status') == STATUS_AVAILABLE else 1
+            candidates.append({'name': doc, 'w': w, 'gc': stats[doc][group], 'tc': stats[doc]['Total']})
+
+        if candidates:
+            candidates.sort(key=lambda x: (-x['w'], x['gc'], x['tc'], random.random()))
+            chosen = candidates[0]['name']
+            schedule[d_str] = chosen
             stats[chosen]['Total'] += 1
-            stats[chosen][get_day_group(d_target)] += 1
-            wk = get_week_key(d_target)
+            stats[chosen][group] += 1
             if wk not in weekly_counts: weekly_counts[wk] = {}
             weekly_counts[wk][chosen] = weekly_counts[wk].get(chosen, 0) + 1
-            
-        # Usuwamy obsadzony dzień z listy
-        unassigned_days.remove(d_target)
+        else:
+            schedule[d_str] = "BRAK"
+            debug_info[d_str] = rej
 
     return schedule, stats, debug_info
 
@@ -337,7 +314,6 @@ def generate_optimized(dates, df, limits, last_duty_prev, attempts=500):
 
     for _ in range(attempts):
         sch, sts, dbg = _generate_single_schedule(dates, prefs_map, limits, last_duty_prev)
-        
         score = sum(1000000 for v in sch.values() if v != "BRAK")
         for g in DAY_GROUPS_LIST:
             cnts = [sts[d][g] for d in ROTATION_DOCTORS]
@@ -462,6 +438,7 @@ with st.sidebar:
     sel_period_name = st.selectbox("Okres", periods, index=default_idx)
     sel_year = st.number_input("Rok", 2025, 2030, today.year)
     start_m = {"Styczeń - Luty": 1, "Marzec - Kwiecień": 3, "Maj - Czerwiec": 5, "Lipiec - Sierpień": 7, "Wrzesień - Październik": 9, "Listopad - Grudzień": 11}[sel_period_name]
+    
     p_start, p_day = get_settlement_period_info(sel_year, start_m)
     st.info(f"Start: {p_start} ({p_day}).")
     attempts_count = st.slider("Próby AI", 100, 1000, 300)
@@ -563,6 +540,8 @@ with tab2:
     col3.metric("Dla Rotacji", max(0, pool_for_rotation))
     
     st.subheader("2. Limity Rotacyjne")
+    st.caption("Możesz ustawić limity wyższe niż liczba dostępnych dni. Algorytm zdecyduje, komu przydzielić dodatkowe dyżury.")
+    
     ts = len(ROTATION_DOCTORS)
     base = max(0, pool_for_rotation) // ts if ts else 0
     
@@ -576,8 +555,12 @@ with tab2:
     current_rot_sum = ed_rot["Limit"].sum()
     total_planned = current_rot_sum + sum_fixed_table
     
-    if total_planned == total_days:
-        st.success("Bilans zgodny.")
+    # ZMIANA: Pozwalamy na overbooking (>= zamiast ==)
+    if total_planned >= total_days:
+        st.success("Bilans wystarczający (można generować).")
+        if total_planned > total_days:
+            st.info(f"Nadmiarowy limit ({total_planned} > {total_days}). Algorytm wybierze optymalne obsadzenie, część limitów nie zostanie wykorzystana.")
+
         if st.button("🚀 GENERUJ GRAFIKI", type="primary"):
             limits = {}
             for _, r in ed_rot.iterrows(): limits[r['Lekarz']] = r['Limit']
@@ -593,8 +576,8 @@ with tab2:
                 ass = sch.get(d_s, "BRAK")
                 res.append({"Data": d, "Info": get_day_description(d), "Dyżurny": ass, "_is_red": is_red_day(d)})
                 if ass == "BRAK":
-                    reason = ", ".join([f"**{k}**: {v}" for k,v in dbg[d_s].items()]) if d_s in dbg else "Brak chętnych"
-                    fails.append(f"🔴 **{d.strftime('%d.%m')}:** {reason}")
+                    reason_str = ", ".join([f"**{k}**: {v}" for k,v in dbg[d_s].items()]) if d_s in dbg and dbg[d_s] else "Brak chętnych"
+                    fails.append(f"🔴 **{d.strftime('%d.%m')}:** {reason_str}")
 
             df_res = pd.DataFrame(res)
             if fails:
